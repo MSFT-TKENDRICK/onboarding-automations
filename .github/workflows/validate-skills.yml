@@ -1,0 +1,44 @@
+name: Validate skills
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install skills-ref
+        run: pip install skills-ref
+
+      - name: Validate every skill
+        run: |
+          status=0
+          for dir in skills/*/; do
+            echo "::group::${dir}"
+            python -m skills_ref.cli validate "${dir}" || status=1
+            echo "::endgroup::"
+          done
+          exit $status
+
+      - name: Check marketplace lists every skill
+        run: |
+          python - <<'PY'
+          import json, pathlib, sys
+          listed = {p for plugin in json.load(open(".claude-plugin/marketplace.json"))["plugins"] for p in plugin.get("skills", [])}
+          present = {f"./skills/{d.name}" for d in pathlib.Path("skills").iterdir() if (d / "SKILL.md").is_file()}
+          missing, stale = present - listed, listed - present
+          for p in sorted(missing): print(f"::error::{p} is not listed in .claude-plugin/marketplace.json")
+          for p in sorted(stale): print(f"::error::{p} is listed in .claude-plugin/marketplace.json but does not exist")
+          sys.exit(1 if missing or stale else 0)
+          PY

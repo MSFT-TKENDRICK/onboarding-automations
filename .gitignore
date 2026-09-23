@@ -1,0 +1,5 @@
+# Session material produced while running skills. Never commit it.
+*.cookies
+cookies.txt
+cookie-jar*
+.skill-work/

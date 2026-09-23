@@ -1,0 +1,21 @@
+{
+  "name": "microsoft-onboarding",
+  "owner": {
+    "name": "MSFT-TKENDRICK"
+  },
+  "metadata": {
+    "description": "Agent Skills that automate common onboarding tasks for Microsoft employees.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "onboarding-skills",
+      "description": "Onboarding skills for Microsoft employees, such as requesting a new Azure subscription.",
+      "source": "./",
+      "strict": false,
+      "skills": [
+        "./skills/request-new-azure-subscription"
+      ]
+    }
+  ]
+}
