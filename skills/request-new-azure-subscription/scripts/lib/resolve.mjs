@@ -91,7 +91,8 @@ export function resolveSlot(key, expectedId, fields, { claimed = new Set(), mapp
     return { id: f.id, label: f.label, score, evidence };
   }).filter((c) => c.score > 0).sort((a, b) => b.score - a.score || (a.id < b.id ? -1 : 1));
 
-  if (expected && !expected.visible) return { ok: false, code: 'not_shown', slot: key, expectedId };
+  // A hidden expected dependent the selected type should show may have been replaced by a new control: drift.
+  if (expected && !expected.visible && !(optional && applicable)) return { ok: false, code: 'not_shown', slot: key, expectedId };
   if (!expected && optional && !applicable && !given && !(scored[0]?.score >= SUGGEST_MIN)) return { ok: false, code: 'not_shown', slot: key, expectedId };
 
   const [best, second] = scored;

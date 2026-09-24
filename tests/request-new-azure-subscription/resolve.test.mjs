@@ -158,6 +158,16 @@ test('hidden dependents are not resolved; an absent one is drift only when it is
   assert.equal(R('title', swap(form(), 'apitil_title', null)).code, 'field_drift');
 });
 
+test('a hidden expected dependent the selected type should show is drift, with the replacement suggested', () => {
+  const f = [...swap(form(), 'desitsm_monthlyspend', { visible: false }), sel('desitsm_monthlybudget', 'Monthly Budget', MONEY)];
+  const r = R('allowance', f, { optional: true, applicable: true, given: true });
+  assert.equal(r.code, 'field_drift', JSON.stringify(r));
+  assert.equal(r.suggested.id, 'desitsm_monthlybudget');
+  assert.equal(R('allowance', f, { optional: true, applicable: true }).code, 'field_drift');
+  // Not applicable for the selected type: still just not shown (the input is ignored with a warning).
+  assert.equal(R('allowance', f, { optional: true, given: true }).code, 'not_shown');
+});
+
 test('fingerprint covers the descriptor (not the value) and ignores option order', () => {
   const a = sel('x', 'Time Zone', TZ);
   assert.equal(fingerprint(a), fingerprint({ ...a, value: 'tz-pst', required: false, visible: false }));
