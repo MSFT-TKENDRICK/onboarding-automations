@@ -42,3 +42,23 @@ jobs:
           for p in sorted(stale): print(f"::error::{p} is listed in .claude-plugin/marketplace.json but does not exist")
           sys.exit(1 if missing or stale else 0)
           PY
+
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      # Ubuntu 24.04 blocks the unprivileged user namespaces Chrome's sandbox needs.
+      - name: Allow the Chrome sandbox
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+
+      # Unit tests plus end-to-end tests of the real CLI driving headless Chrome against a local mock portal.
+      # The integration tests skip themselves when no Chromium-family browser is installed.
+      - name: Run tests
+        run: npm test
+        env:
+          MCAPS_BROWSER: /usr/bin/google-chrome
