@@ -44,6 +44,25 @@ describe('validatorProof', () => {
     assert.equal(r.ok, false);
     assert.equal(r.reason, 'shared_control');
   });
+  it('needs the message to start with the label ("Job Title is required" is not Title evidence)', () => {
+    const r = validatorProof('title', [v('job_title', 'Job Title is a required field.')], new Set(['job_title']), LABELS);
+    assert.equal(r.ok, false);
+    assert.equal(r.reason, 'no_validator');
+    assert.equal(validatorLabel('Please select a Time Zone', 'Time Zone', { anchored: true }), false);
+    assert.equal(validatorLabel('  Time Zone is a required field.', 'Time Zone', { anchored: true }), true);
+  });
+  it('a disabled validator is no evidence, but still voids a proof that points elsewhere', () => {
+    const off = (control, message) => ({ control, message, enabled: false });
+    assert.equal(validatorProof('allowance', [off('new_spend', 'Monthly Allowance is required')], eligible, LABELS).reason, 'no_validator');
+    const r = validatorProof('allowance', [v('new_spend', 'Monthly Allowance is required'), off('other_select', 'Monthly Allowance is required')], eligible, LABELS);
+    assert.equal(r.reason, 'multiple_controls');
+    const s = validatorProof('allowance', [v('new_spend', 'Monthly Allowance is required'), off('new_spend', 'Time Zone is required')], eligible, LABELS);
+    assert.equal(s.reason, 'shared_control');
+  });
+  it('a mention of the label on another control (not at the start) voids the proof', () => {
+    const r = validatorProof('allowance', [v('new_spend', 'Monthly Allowance is required'), v('other_select', 'Pick the Monthly Allowance first')], eligible, LABELS);
+    assert.equal(r.reason, 'multiple_controls');
+  });
   it('does not treat a longer label containing a shorter one as compound (Tenant Type vs Type)', () => {
     const r = validatorProof('tenantType', [v('other_select', 'Tenant Type is a required field.')], new Set(['other_select']), { ...LABELS, type: 'Type' });
     assert.equal(r.ok, true, JSON.stringify(r));
