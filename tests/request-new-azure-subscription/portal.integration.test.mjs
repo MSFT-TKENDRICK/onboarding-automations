@@ -8,6 +8,7 @@ import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startMockPortal, DEFAULTS } from './fixtures/mock-portal.mjs';
+import { startFakeSystemOne, answer, keyOf } from './fixtures/fake-systemone.mjs';
 import { run } from '../../skills/request-new-azure-subscription/scripts/mcaps-subscription.mjs';
 import { findBrowser } from '../../skills/request-new-azure-subscription/scripts/lib/browser.mjs';
 import { profileInUse } from '../../skills/request-new-azure-subscription/scripts/lib/cleanup.mjs';
@@ -516,5 +517,147 @@ describe('form drift: resolve renamed/relabeled controls without weakening the P
     assert.ok(d, JSON.stringify(p.out.missing));
     assert.equal(d.suggested, undefined);
     assert.deepEqual(d.candidates.map((c) => c.id).sort(), ['desitsm_tzdup', 'desitsm_tzone']);
+  }));
+});
+describe('System One drift assist: proofs authorize, probabilities rank', { skip, concurrency: 2, timeout: 600000 }, () => {
+  const ARGS = ['--type', 'internal', '--owner', 'testuser@contoso.com', '--allowance', '500'];
+  const core = ({ ms, timings, phases, ...rest }) => rest;
+  const useModel = (sc, fake, extra = {}) => { Object.assign(sc.env, { MCAPS_SYSTEMONE_URL: fake.url, MCAPS_SYSTEMONE_TIMEOUT_MS: '3000' }, extra); };
+  const noModel = (sc) => { for (const k of Object.keys(sc.env)) if (k.startsWith('MCAPS_SYSTEMONE_')) delete sc.env[k]; };
+  async function withFake(overrides, responder, fn) {
+    const fake = await startFakeSystemOne(responder);
+    try { await with_(overrides, async (sc) => { noModel(sc); await fn(sc, fake); }); } finally { await fake.close(); }
+  }
+  const names = (fake) => fake.hits.map((h) => Object.keys(h.body?.questions ?? {})[0]);
+  const remapped = (out, field) => out.warnings.find((w) => w.code === 'field_remapped' && w.field === field);
+
+  it('heals a renamed and relabeled control by its validator proof, with no model', () => withFake({ drift: { rename: { desitsm_timezonelist: 'desitsm_localtime' }, relabel: { desitsm_timezonelist: 'Local Time' }, validatorLabel: { desitsm_timezonelist: 'Time Zone' } } }, undefined, async (sc, fake) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.deepEqual(remapped(p.out, 'timezone'), { code: 'field_remapped', field: 'timezone', expectedId: 'desitsm_timezonelist', id: 'desitsm_localtime', label: 'Local Time', via: 'validator', evidence: { message: 'Time Zone is a required field.' } });
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions[0].desitsm_localtime, 'tz-pst');
+    assert.equal(fake.hits.length, 0);
+  }));
+
+  it('a changed validator message after plan is a plan_mismatch (the proof is part of the plan)', () => withFake({ drift: { rename: { desitsm_timezonelist: 'desitsm_localtime' }, relabel: { desitsm_timezonelist: 'Local Time' }, validatorLabel: { desitsm_timezonelist: 'Time Zone' } } }, undefined, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    sc.m.state.config.drift = { ...sc.m.state.config.drift, validatorLabel: { desitsm_timezonelist: 'Time Zone or Local Time' } };
+    const s = await submit(sc, p);
+    assert.equal(s.out.reason, 'plan_mismatch', JSON.stringify(s.out));
+    assert.ok(s.out.changes.some((c) => c.path === 'fieldMap.timezone.proof'), JSON.stringify(s.out.changes));
+    assert.equal(sc.m.state.submissions.length, 0);
+  }));
+
+  it('ranks indistinguishable candidates but never binds one or makes the plan ready', () => withFake({ drift: { rename: { desitsm_timezonelist: 'desitsm_tzone' }, duplicateLabel: { of: 'desitsm_timezonelist', id: 'desitsm_tzdup' } } }, (q) => answer(q, { c1: 0.5, c2: 0.4, none: 0.1 }), async (sc, fake) => {
+    useModel(sc, fake);
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'needs_input', JSON.stringify(p.out));
+    assert.equal(p.out.resolved.timezone, undefined);
+    const d = p.out.missing.find((m) => m.code === 'field_drift' && m.field === 'timezone');
+    assert.equal(d.rankedBy, 'systemone', JSON.stringify(d));
+    assert.equal(d.suggested, undefined);
+    assert.equal(d.pNone, 0.1);
+    assert.deepEqual(d.candidates.slice(0, 2).map((c) => c.p), [0.5, 0.4]);
+    assert.deepEqual(d.candidates.slice(0, 2).map((c) => c.id).sort(), ['desitsm_tzdup', 'desitsm_tzone']);
+    assert.deepEqual(names(fake), ['field_timezone']);
+    for (const h of fake.hits) assert.doesNotMatch(h.raw, /desitsm_|tzdup|tzone/, 'control ids never leave the process');
+    // Even a confident ranking only suggests: still needs_input, the user confirms with --map.
+    fake.state.responder = (q) => answer(q, { c1: 0.95 });
+    const sure = await plan(sc);
+    assert.equal(sure.out.status, 'needs_input', JSON.stringify(sure.out));
+    const e = sure.out.missing.find((m) => m.code === 'field_drift' && m.field === 'timezone');
+    assert.equal(e.suggested?.p, 0.95, JSON.stringify(e));
+    assert.ok(e.suggested.evidence.includes('systemone'));
+    assert.match(e.message, new RegExp(`--map timezone=${e.suggested.id}`));
+    assert.equal(sure.out.resolved.timezone, undefined);
+  }));
+
+  it('model timeout, http errors and garbage leave the deterministic output unchanged', () => withFake({ drift: { rename: { desitsm_monthlyspend: 'desitsm_budget' }, relabel: { desitsm_monthlyspend: 'Budget' } } }, () => 'hang', async (sc, fake) => {
+    const args = ['plan', '--title', 'IT lab', '--purpose', 'Hybrid', ...ARGS, '--timezone', 'Seattle'];
+    const off = await sc.cli(...args);
+    assert.equal(off.out.status, 'invalid', JSON.stringify(off.out));
+    for (const responder of ['hang', () => ({ status: 500, raw: '{}' }), () => ({ status: 200, raw: 'not json' }), (q) => ({ ...answer(q, { none: 0.9 }), choice: 'o1' })]) {
+      fake.state.responder = typeof responder === 'string' ? () => responder : responder;
+      useModel(sc, fake, { MCAPS_SYSTEMONE_TIMEOUT_MS: '300' });
+      const on = await sc.cli(...args);
+      assert.deepEqual(core(on.out), core(off.out));
+    }
+    assert.ok(fake.hits.length >= 8, `asked: ${names(fake)}`);
+  }));
+
+  it('commits a confident intent to one live option, reports it in inferred, and submit replays it with no model', () => withFake({}, (q, b, name) => (name === 'option_timezone' ? answer(q, { [keyOf(q, /Pacific/)]: 0.95 }) : answer(q, { none: 0.99 })), async (sc, fake) => {
+    useModel(sc, fake);
+    const p = await sc.cli('plan', '--title', 'IT lab', '--purpose', 'Hybrid', ...ARGS, '--timezone', 'Seattle');
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.deepEqual(p.out.inferred, [{ field: 'timezone', wanted: 'Seattle', value: 'tz-pst', label: '(UTC-08:00) Pacific Time (US & Canada)', confidence: 0.95 }]);
+    assert.deepEqual(p.out.resolved.timezone, { value: 'tz-pst', label: '(UTC-08:00) Pacific Time (US & Canada)', matchedBy: 'systemone', confidence: 0.95 });
+    assert.match(p.out.next, /inferred/);
+    assert.deepEqual(names(fake), ['option_timezone']);
+    const hits = fake.hits.length;
+    sc.env.MCAPS_SYSTEMONE_URL = 'http://127.0.0.1:1';
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions[0].desitsm_timezonelist, 'tz-pst');
+    assert.equal(fake.hits.length, hits, 'submit never calls the model');
+  }));
+
+  it('low confidence or none keeps the invalid_option error', () => withFake({}, (q) => answer(q, { [keyOf(q, /Pacific/)]: 0.7 }), async (sc, fake) => {
+    useModel(sc, fake);
+    const args = ['plan', '--title', 'IT lab', '--purpose', 'Hybrid', ...ARGS, '--timezone', 'Seattle'];
+    const low = await sc.cli(...args);
+    assert.equal(low.out.status, 'invalid', JSON.stringify(low.out));
+    const e = low.out.errors.find((x) => x.field === 'timezone');
+    assert.equal(e.code, 'invalid_option');
+    assert.equal(e.rankedBy, 'systemone');
+    assert.equal(e.candidates[0], '(UTC-08:00) Pacific Time (US & Canada)');
+    assert.equal(low.out.inferred, undefined);
+    assert.equal(low.out.resolved.timezone, undefined);
+    fake.state.responder = (q) => answer(q, { none: 0.95 });
+    const none = await sc.cli(...args);
+    assert.equal(none.out.status, 'invalid', JSON.stringify(none.out));
+    assert.equal(none.out.errors.find((x) => x.field === 'timezone')?.code, 'invalid_option');
+    assert.equal(none.out.inferred, undefined);
+  }));
+
+  it('never remaps or infers the owner', () => withFake({ drift: { rename: { desitsm_subscriptionowner: 'desitsm_owner_v2' } } }, (q) => answer(q, { c1: 0.99 }), async (sc, fake) => {
+    useModel(sc, fake);
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));
+    assert.ok(p.out.blockers.some((b) => b.code === 'form_drift' && b.field === 'owner'));
+    assert.ok(!names(fake).some((n) => /owner/.test(n)), `asked: ${names(fake)}`);
+    assert.equal(p.out.inferred, undefined);
+    sc.m.state.config.drift = {};
+    const before = fake.hits.length;
+    const u = await sc.cli('plan', '--title', 'IT lab', '--purpose', 'Hybrid', '--type', 'internal', '--owner', 'Nobody Known', '--allowance', '500', '--timezone', 'America/Los_Angeles');
+    assert.notEqual(u.out.status, 'ready', JSON.stringify(u.out));
+    assert.equal(fake.hits.length, before, 'owner resolution never asks the model');
+  }));
+
+  it('the happy path is identical with the model enabled, disabled or refused', () => withFake({}, (q) => answer(q, { c1: 0.99 }), async (sc, fake) => {
+    const off = await plan(sc);
+    assert.equal(off.out.status, 'ready', JSON.stringify(off.out));
+    useModel(sc, fake);
+    const on = await plan(sc);
+    assert.equal(on.out.planId, off.out.planId);
+    assert.deepEqual(core(on.out), core({ ...off.out, expiresAt: on.out.expiresAt }));
+    assert.equal(fake.hits.length, 0);
+    sc.env.MCAPS_SYSTEMONE_URL = 'http://example.com:8700';
+    const refused = await plan(sc);
+    assert.equal(refused.out.status, 'ready', JSON.stringify(refused.out));
+    assert.equal(refused.out.planId, off.out.planId);
+    assert.ok(refused.out.warnings.some((w) => w.code === 'systemone_refused'), JSON.stringify(refused.out.warnings));
+  }));
+
+  it('never sends the owner, GUIDs, the title or control ids to System One', () => withFake({ drift: { rename: { desitsm_monthlyspend: 'desitsm_budget' }, relabel: { desitsm_monthlyspend: 'Budget of Test User (testuser@contoso.com)' }, duplicateLabel: { of: 'desitsm_monthlyspend', id: 'desitsm_budgetdup' } } }, (q) => answer(q, { none: 0.9 }), async (sc, fake) => {
+    useModel(sc, fake);
+    const p = await sc.cli('plan', '--title', 'Zebra Canary Lab', '--purpose', 'Hybrid', ...ARGS, '--timezone', 'Seattle for testuser@contoso.com 11111111-1111-4111-8111-111111111111 Zebra Canary Lab');
+    assert.notEqual(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.deepEqual(names(fake).sort(), ['field_allowance', 'option_timezone'], JSON.stringify(p.out));
+    for (const h of fake.hits) {
+      for (const secret of [/testuser/i, /Test User/i, /Zebra/i, /Canary/i, /11111111-1111/, /c0ffee00/i, /contoso/i, /desitsm_/, /budgetdup/]) assert.doesNotMatch(h.raw, secret, `leaked ${secret} in ${h.raw}`);
+    }
   }));
 });
