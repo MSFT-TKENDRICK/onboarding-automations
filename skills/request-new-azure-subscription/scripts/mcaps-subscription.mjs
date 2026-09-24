@@ -10,12 +10,15 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openSession, openForm, fill, submit, ownRequests, findDuplicates, planMaterial, normalizeInput, DEFAULT_FORM_URL, SkillError } from './lib/portal.mjs';
 import { stateDir, savePlan, loadPlan, readLock, requestKey, planId as hashPlan } from './lib/plan-store.mjs';
+import { systemTimeZone } from './lib/defaults.mjs';
 import { killAllBrowsers } from './lib/browser.mjs';
 
 const HELP = `Usage: node mcaps-subscription.mjs <plan|submit|status|options> [flags]
-Inputs (plan/options): --title --purpose --type internal|external --owner <alias|email|full name>
-  --allowance 500 --timezone "Pacific Time" | America/Los_Angeles | UTC-08:00
+Inputs (plan/options), all optional thanks to defaults: --title --purpose --type internal|external
+  --owner <alias|email|full name> --allowance 500 --timezone "Pacific Time" | America/Los_Angeles | UTC-08:00
   --tenant-type --tenant-licensing --tenant-name  --field <id>=<value> (repeatable)  --json <file|->
+Defaults (reported in "defaulted"): type internal, highest allowance, owner = you, this computer's time zone,
+  title "<alias> Azure subscription <date>", and any field with a single option. --no-defaults asks for everything.
 Submit: --plan <planId> --accept-terms <termsSha> [--allow-duplicate]
 Status: [--case REQ-123456-2026]
 Common: --headed (interactive sign-in)  --ephemeral (throwaway browser profile)  --browser <path>  --verbose  --pretty`;
@@ -32,7 +35,7 @@ function parse(argv) {
       'tenant-name': { type: 'string' }, field: { type: 'string', multiple: true }, json: { type: 'string' },
       plan: { type: 'string' }, 'accept-terms': { type: 'string' }, 'allow-duplicate': { type: 'boolean' },
       case: { type: 'string' }, headed: { type: 'boolean' }, ephemeral: { type: 'boolean' }, browser: { type: 'string' }, verbose: { type: 'boolean' }, pretty: { type: 'boolean' },
-      'full-terms': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
+      'full-terms': { type: 'boolean' }, 'no-defaults': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     },
   });
   return { cmd: positionals[0], extra: positionals.slice(1), v: values };
@@ -59,9 +62,9 @@ const readProfile = (dir) => { try { return JSON.parse(readFileSync(profilePath(
 const saveProfile = (dir, p) => { try { writeFileSync(profilePath(dir), JSON.stringify({ ...readProfile(dir), ...p, updatedAt: new Date().toISOString() }, null, 2)); } catch {} };
 
 function publicPlanView(r, { fullTerms }) {
-  const { resolved, derived, missing, errors, blockers, warnings, eligibility, validation, terms, status, timings } = r;
+  const { resolved, derived, defaulted, missing, errors, blockers, warnings, eligibility, validation, terms, status, timings } = r;
   return {
-    status, resolved, derived, missing, errors, blockers, warnings,
+    status, resolved, defaulted, derived, missing, errors, blockers, warnings,
     eligibility: eligibility?.ok ? { activeRequests: eligibility.active } : eligibility,
     validation: validation && { ok: validation.ok, failures: validation.failures },
     terms: terms?.sha ? { sha: terms.sha, links: terms.links, text: fullTerms || status === 'ready' ? terms.text : `${terms.text.slice(0, 280)}…` } : terms,
@@ -116,21 +119,22 @@ export async function run(argv, { env = process.env, stdinText = () => readFileS
     }
     await openForm(s);
     if (cmd === 'plan' || cmd === 'options') {
-      const r = await fill(s, input, { discover: cmd === 'options' });
+      const r = await fill(s, input, { discover: cmd === 'options', defaults: !v['no-defaults'], timeZone: systemTimeZone(env) });
       if (r.contactId) saveProfile(dir, { contactId: r.contactId });
+      const effective = r.input ?? input;
       if (cmd === 'plan' && r.status === 'ready' && r.contactId) {
-        const dup = await findDuplicates(s, r.contactId, input.title);
+        const dup = await findDuplicates(s, r.contactId, effective.title);
         if (!dup.ok) r.warnings.push({ code: 'duplicate_check_failed', message: dup.error });
         else if (dup.rows.length) r.warnings.push({ code: 'possible_duplicate', message: 'You already have an active request with this title from the last 24h; submit will refuse unless --allow-duplicate is passed.', requests: dup.rows });
       }
       const view = publicPlanView(r, { fullTerms: v['full-terms'] });
-      if (cmd === 'options') return { code: 0, out: { ok: true, status: r.status, fields: r.fields, missing: r.missing, errors: r.errors, blockers: r.blockers, warnings: r.warnings, ms: Math.round(performance.now() - t0) } };
+      if (cmd === 'options') return { code: 0, out: { ok: true, status: r.status, fields: r.fields, defaulted: r.defaulted, missing: r.missing, errors: r.errors, blockers: r.blockers, warnings: r.warnings, ms: Math.round(performance.now() - t0) } };
       const out = { ok: r.status === 'ready', ...view, ms: Math.round(performance.now() - t0), phases: s.marks, profile: s.profile };
       if (r.status === 'ready') {
-        const material = planMaterial(formUrl, input, r);
+        const material = planMaterial(formUrl, effective, r);
         const id = hashPlan(material);
         const expiresAt = new Date(Date.now() + PLAN_TTL_MS).toISOString();
-        savePlan(dir, { planId: id, createdAt: new Date().toISOString(), expiresAt, formUrl, input, material, terms: { sha: r.terms.sha } });
+        savePlan(dir, { planId: id, createdAt: new Date().toISOString(), expiresAt, formUrl, input: effective, material, terms: { sha: r.terms.sha } });
         Object.assign(out, { planId: id, expiresAt, next: `Show the user the plan and the full terms. Only after they explicitly accept: node mcaps-subscription.mjs submit --plan ${id} --accept-terms <terms.sha>` });
       }
       return { code: EXIT[r.status] ?? 1, out };

@@ -17,17 +17,21 @@ Every run prints one JSON object on stdout. With `--verbose`, diagnostics go to 
 
 ## Inputs (`plan`, `options`)
 
-| Flag | Notes |
-|---|---|
-| `--title` | Required. |
-| `--purpose` | Matched to the current purpose list: exact value or label first, then a unique substring or all-words match (case-insensitive). Ambiguous → `invalid` with candidates. |
-| `--type` | `internal` or `external`. |
-| `--owner` | Alias, email or full name. Resolved through the portal's own people search. Ambiguous or unknown → candidates. |
-| `--allowance` | Monthly allowance, matched to the current list. |
-| `--timezone` | `Pacific Time`, `America/Los_Angeles`, `UTC-08:00`, … |
-| `--tenant-type`, `--tenant-licensing`, `--tenant-name` | External subscriptions only. |
-| `--field <id>=<value>` | Repeatable. For new required fields the portal adds (form drift). |
-| `--json <file\|->` | The same inputs as JSON (`title`, `purpose`, `type`, `owner`, `allowance`, `timezone`, `tenantType`, `tenantLicensing`, `tenantName`, `fields`). |
+Every input is optional. Values not given are defaulted and listed in `defaulted`; `--no-defaults` turns defaults off so every value missing from the input is reported in `missing`. A default is applied only when it maps to exactly one current option; otherwise the field is reported in `missing`. `submit` replays the planned values (defaults included) exactly and never re-defaults.
+
+| Flag | Default | Notes |
+|---|---|---|
+| `--title` | `<owner alias> Azure subscription <YYYY-MM-DD>` | Up to 256 characters. |
+| `--purpose` | The only option, if exactly one | Matched to the current purpose list: exact value or label first, then a unique substring or all-words match (case-insensitive). Ambiguous → `invalid` with candidates. |
+| `--type` | `internal` | `internal` or `external`. |
+| `--owner` | The signed-in user | Alias, email or full name. Resolved through the portal's own people search. Ambiguous or unknown → candidates. |
+| `--allowance` | The highest amount offered | Monthly allowance, matched to the current list. |
+| `--timezone` | `MCAPS_TIMEZONE`, else this computer's IANA zone | `Pacific Time`, `America/Los_Angeles`, `UTC-08:00`, … |
+| `--tenant-type`, `--tenant-licensing` | The only option, if exactly one | External subscriptions only. |
+| `--tenant-name` | None | External subscriptions only. |
+| `--field <id>=<value>` | None | Repeatable. For new required fields the portal adds (form drift). |
+| `--json <file\|->` | | The same inputs as JSON (`title`, `purpose`, `type`, `owner`, `allowance`, `timezone`, `tenantType`, `tenantLicensing`, `tenantName`, `fields`). |
+| `--no-defaults` | | Apply no defaults. |
 
 ## Common flags
 
@@ -45,6 +49,7 @@ Every run prints one JSON object on stdout. With `--verbose`, diagnostics go to 
 |---|---|
 | `status` | `ready`, `needs_input`, `invalid` or `blocked`. |
 | `resolved` | Each field's matched `{ label, value }`. |
+| `defaulted` | `[{ field, value, reason }]`: values the user did not give. Show them so the user can override. |
 | `derived` | Values the portal derives, for example `manager`. |
 | `missing` / `errors` | `{ field, message, options?, candidates? }`: ask the user. |
 | `blockers` | Codes include `active_request`, `mcaps_access`, `owner_cleared`, `owner_not_found`, `manager_missing`, `unknown_required_field`, `portal_validation`. |
@@ -119,6 +124,7 @@ The browser is controlled over `--remote-debugging-pipe`, so no DevTools TCP por
 | `MCAPS_EPHEMERAL=1` | Always use throwaway profiles. |
 | `MCAPS_PROFILE_DIR` | Override the persistent profile location. |
 | `MCAPS_BROWSER` | Browser executable. |
+| `MCAPS_TIMEZONE` | Default time zone (IANA name such as `Europe/Dublin`, or a portal label) instead of this computer's. |
 | `MCAPS_LOG_FILE` | Append the diagnostic log to a file. |
 | `MCAPS_TRACE_NET=1` | Log every network request with its duration (performance work). |
 | `MCAPS_PORTAL_URL` | Point at another portal URL (tests use a local mock). |

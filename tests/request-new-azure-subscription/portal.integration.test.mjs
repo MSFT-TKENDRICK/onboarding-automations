@@ -29,9 +29,10 @@ async function scenario({ persistent = false, ...overrides } = {}) {
   const env = { ...process.env, MCAPS_PORTAL_URL: m.formUrl, MCAPS_SKILL_HOME: home, MCAPS_LOG_FILE: join(home, 'run.log') };
   delete env.MCAPS_EPHEMERAL; delete env.MCAPS_PROFILE_DIR;
   if (!persistent) env.MCAPS_EPHEMERAL = '1';
+  env.MCAPS_TIMEZONE = 'America/Los_Angeles';
   const cli = (...args) => run(args, { env });
   const formPosts = () => m.state.writes.filter((w) => w.path.startsWith('/support/eslabs-newazuresubscription')).length;
-  return { m, cli, formPosts, home, async done() {
+  return { m, cli, env, formPosts, home, async done() {
     await m.close();
     // Async rm: rmSync's retries sleep synchronously and would stall the concurrently running scenario.
     // The persistent profile can stay locked while Edge is reaped; the OS temp cleanup covers leftovers.
@@ -92,6 +93,41 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     const purpose = r.out.missing.find((x) => x.field === 'purpose');
     assert.ok(purpose.options.includes('Hybrid (Self-Learning/Demo)'));
     assert.equal(r.out.planId, undefined);
+  }));
+
+  it('defaults internal type, highest allowance, self as owner, local time zone and a title', () => with_({}, async (sc) => {
+    const r = await sc.cli('plan', '--purpose', 'Hybrid');
+    assert.equal(r.out.status, 'ready', JSON.stringify(r.out));
+    assert.match(r.out.resolved.type.label, /^Internal/);
+    assert.equal(r.out.resolved.allowance.value, '1500');
+    assert.equal(r.out.resolved.owner.upn, 'testuser@contoso.com');
+    assert.equal(r.out.resolved.timezone.value, 'tz-pst');
+    assert.match(r.out.resolved.title.value, /^testuser Azure subscription \d{4}-\d{2}-\d{2}$/);
+    assert.deepEqual(r.out.defaulted.map((d) => d.field).sort(), ['allowance', 'owner', 'timezone', 'title', 'type']);
+    assert.ok(r.out.defaulted.every((d) => d.value && d.reason), JSON.stringify(r.out.defaulted));
+    // Submit replays the planned values: nothing is re-defaulted (a changed zone cannot alter the request).
+    sc.env.MCAPS_TIMEZONE = 'America/New_York';
+    const s = await submit(sc, r);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions[0].desitsm_monthlyspend, '1500');
+    assert.equal(sc.m.state.submissions[0].desitsm_timezonelist, 'tz-pst');
+  }));
+
+  it('defaults the purpose only when the portal offers exactly one; unmatched zones stay missing', () => with_({ purposes: [['444350001', 'Hybrid (Self-Learning/Demo)']] }, async (sc) => {
+    sc.env.MCAPS_TIMEZONE = 'Asia/Tokyo';
+    const r = await sc.cli('plan');
+    assert.equal(r.out.status, 'needs_input', JSON.stringify(r.out));
+    assert.equal(r.out.resolved.purpose.label, 'Hybrid (Self-Learning/Demo)');
+    assert.deepEqual(r.out.missing.map((x) => x.field), ['timezone']);
+    assert.equal(r.out.errors.length, 0, JSON.stringify(r.out.errors));
+    assert.ok(!r.out.defaulted.some((d) => d.field === 'timezone'));
+  }));
+
+  it('--no-defaults asks for every value', () => with_({}, async (sc) => {
+    const r = await sc.cli('plan', '--purpose', 'Hybrid', '--no-defaults');
+    assert.equal(r.out.status, 'needs_input');
+    for (const f of ['owner', 'type', 'title']) assert.ok(r.out.missing.some((x) => x.field === f), f);
+    assert.deepEqual(r.out.defaulted, []);
   }));
 
   it('refuses ambiguous option matches instead of guessing', () => with_({}, async (sc) => {
