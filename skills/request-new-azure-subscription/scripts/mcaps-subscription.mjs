@@ -17,6 +17,8 @@ const HELP = `Usage: node mcaps-subscription.mjs <plan|submit|status|options> [f
 Inputs (plan/options), all optional thanks to defaults: --title --purpose --type internal|external
   --owner <alias|email|full name> --allowance 500 --timezone "Pacific Time" | America/Los_Angeles | UTC-08:00
   --tenant-type --tenant-licensing --tenant-name  --field <id>=<value> (repeatable)  --json <file|->
+  --map <slot>=<fieldId> (repeatable): bind an input to a renamed/relabeled control, only after the user confirmed a
+  field_drift suggestion. Slots: title purpose type allowance timezone tenantType tenantLicensing tenantName.
 Defaults (reported in "defaulted"): type internal, highest allowance, owner = you, this computer's time zone,
   title "<alias> Azure subscription <date>", and any field with a single option. --no-defaults asks for everything.
 Submit: --plan <planId> --accept-terms <termsSha> [--allow-duplicate]
@@ -32,7 +34,7 @@ function parse(argv) {
     options: {
       title: { type: 'string' }, purpose: { type: 'string' }, type: { type: 'string' }, owner: { type: 'string' },
       allowance: { type: 'string' }, timezone: { type: 'string' }, 'tenant-type': { type: 'string' }, 'tenant-licensing': { type: 'string' },
-      'tenant-name': { type: 'string' }, field: { type: 'string', multiple: true }, json: { type: 'string' },
+      'tenant-name': { type: 'string' }, field: { type: 'string', multiple: true }, map: { type: 'string', multiple: true }, json: { type: 'string' },
       plan: { type: 'string' }, 'accept-terms': { type: 'string' }, 'allow-duplicate': { type: 'boolean' },
       case: { type: 'string' }, headed: { type: 'boolean' }, ephemeral: { type: 'boolean' }, browser: { type: 'string' }, verbose: { type: 'boolean' }, pretty: { type: 'boolean' },
       'full-terms': { type: 'boolean' }, 'no-defaults': { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
@@ -52,6 +54,14 @@ function readInput(v, stdinText) {
       const i = kv.indexOf('=');
       if (i < 1) throw new SkillError('bad_args', `--field expects id=value, got "${kv}"`);
       raw.fields[kv.slice(0, i).trim()] = kv.slice(i + 1);
+    }
+  }
+  if (v.map?.length) {
+    raw.map = { ...(raw.map && typeof raw.map === 'object' ? raw.map : {}) };
+    for (const kv of v.map) {
+      const i = kv.indexOf('=');
+      if (i < 1 || !kv.slice(i + 1).trim()) throw new SkillError('bad_args', `--map expects slot=fieldId, got "${kv}"`);
+      raw.map[kv.slice(0, i).trim()] = kv.slice(i + 1).trim();
     }
   }
   return normalizeInput(raw);

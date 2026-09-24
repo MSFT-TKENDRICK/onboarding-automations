@@ -32,7 +32,12 @@ export function pageState() {
   const txt = (s) => (s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
   const form = document.getElementById('liquid_form');
   const overlay = document.getElementById('pageLoaderOverlay');
-  const purpose = document.getElementById('desitsm_subscriptionpurposeaz');
+  // Expected id first; otherwise the unique form select labelled as the subscription purpose (renamed control).
+  let purpose = document.getElementById('desitsm_subscriptionpurposeaz');
+  if (!purpose && form) {
+    const hits = [...form.querySelectorAll('select')].filter((s) => s.id && /subscription purpose/i.test(txt((document.getElementById(`${s.id}_label`) || document.querySelector(`label[for="${s.id}"]`))?.textContent)));
+    purpose = hits.length === 1 ? hits[0] : null;
+  }
   return {
     url: location.href,
     title: document.title,
@@ -41,6 +46,7 @@ export function pageState() {
     hasForm: !!form,
     overlay: !!overlay && getComputedStyle(overlay).display !== 'none',
     purposeOptions: purpose ? [...purpose.options].filter((o) => o.value).length : 0,
+    purposeId: purpose?.id ?? null,
     // Portal init strips the server-rendered purposes (capturing them in a global) and marks the select loading
     // until the allowed ones are re-added (~5 s later). null = marker unavailable (portal changed).
     // eslint-disable-next-line no-undef
@@ -81,7 +87,7 @@ export function snapshotFields() {
     if (seen.has(id) || /^frm_pref_/.test(id)) continue;
     seen.add(id);
     const labelEl = document.getElementById(`${id}_label`) || document.querySelector(`label[for="${id}"]`);
-    const f = { id, tag: el.tagName.toLowerCase(), type: el.type, label: txt(labelEl?.textContent), visible: vis(el), readonly: !!(el.readOnly || el.disabled), required: required.has(id), value: el.type === 'radio' ? (document.querySelector(`input[name="${el.name}"]:checked`)?.value ?? '') : el.value };
+    const f = { id, name: el.name || '', tag: el.tagName.toLowerCase(), type: el.type, label: txt(labelEl?.textContent), visible: vis(el), readonly: !!(el.readOnly || el.disabled), required: required.has(id), value: el.type === 'radio' ? (document.querySelector(`input[name="${el.name}"]:checked`)?.value ?? '') : el.value };
     if (el.tagName === 'SELECT') { f.options = [...el.options].map((o) => ({ value: o.value, label: txt(o.text) })); f.text = txt(el.selectedOptions[0]?.text); }
     if (el.type === 'radio') f.options = [...document.querySelectorAll(`input[name="${el.name}"]`)].map((r) => ({ value: r.value, label: txt(document.querySelector(`label[for="${r.id}"]`)?.textContent) }));
     if (el.type === 'checkbox') f.value = el.checked ? 'true' : 'false';
@@ -102,10 +108,13 @@ export function readValues(ids) {
 
 // Set a select/text/radio value and dispatch native events the portal's (fresh) jQuery listens to.
 export function setField(id, value) {
-  const el = document.getElementById(id) || document.querySelector(`input[type=radio][id^="${id}_"][value="${value}"]`);
+  // Power Pages radio lists wrap the options (`${id}_<n>`) in a container that carries the synthetic id itself.
+  let el = document.getElementById(id);
+  if (el && !['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) el = null;
+  el = el || [...document.querySelectorAll('#liquid_form input[type=radio]')].find((r) => r.id.startsWith(`${id}_`) && /^\d+$/.test(r.id.slice(id.length + 1)));
   if (!el) return { ok: false, error: 'not_found' };
   if (el.type === 'radio') {
-    const r = document.querySelector(`input[type=radio][name="${el.name}"][value="${value}"]`);
+    const r = [...document.querySelectorAll('#liquid_form input[type=radio]')].find((x) => x.name === el.name && x.value === value);
     if (!r) return { ok: false, error: 'no_option' };
     r.click();
     return { ok: r.checked, value: r.value };
@@ -268,17 +277,39 @@ export function clickInsert() {
 
 // Name/value pairs the browser will serialize for these field ids (mirrors HTML form serialization: controls outside
 // the form, disabled controls, unchecked boxes and selects without a selection are never posted; newlines are CRLF).
+// A radio group is addressed by its synthetic id (the option ids are `${id}_<n>` and must share one name).
 export function formBinding(ids) {
   const out = [];
   const form = document.getElementById('liquid_form');
   for (const id of ids) {
-    const el = document.getElementById(id);
+    let el = document.getElementById(id);
+    if (el && !['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) el = null;
+    if (!el && form) {
+      const group = [...form.querySelectorAll('input[type=radio]')].filter((r) => r.id.startsWith(`${id}_`) && /^\d+$/.test(r.id.slice(id.length + 1)));
+      if (!group.length || new Set(group.map((r) => r.name)).size !== 1) continue;
+      el = group.find((r) => r.checked);
+      if (!el) continue;
+    }
     if (!el || !el.name || el.disabled || (form && el.form !== form)) continue;
     if (el.type === 'checkbox' || el.type === 'radio') { if (el.checked) out.push([el.name, el.value || 'on']); continue; }
     if (el.tagName === 'SELECT' && el.selectedIndex < 0) continue;
     out.push([el.name, String(el.value).replace(/\r?\n|\r/g, '\r\n')]);
   }
   return out;
+}
+
+// Everything the browser would serialize for #liquid_form right now (submitter excluded), in document order.
+// Any non-empty file control is flagged: this skill never uploads files, so the caller refuses to submit.
+export function serializeForm() {
+  const form = document.getElementById('liquid_form');
+  if (!form) return { ok: false, error: 'no_form' };
+  const pairs = [];
+  let files = false;
+  for (const [name, value] of new FormData(form)) {
+    if (typeof value !== 'string') { if (value.name || value.size) files = true; pairs.push([name, '']); continue; }
+    pairs.push([name, value.replace(/\r?\n|\r/g, '\r\n')]);
+  }
+  return { ok: true, pairs, files };
 }
 
 // Parse a post-submit page for case ids, validation errors and modals.
