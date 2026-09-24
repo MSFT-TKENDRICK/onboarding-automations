@@ -16,10 +16,10 @@ Run `node <skill>/scripts/mcaps-subscription.mjs <command>`, where `<skill>` is 
 ## Rules
 
 - `plan`, `options` and `status` never send or change a request. `submit` sends it and is intentionally not pre-approved.
-- Never pick a value the user did not give, beyond the defaults in step 1. Never choose a person, a candidate option or a form control for the user. A `field_remapped` entry was proven by the script; disclose it, it needs no `--map`.
+- Never pick a value the user did not give, beyond the defaults in step 1. Never choose a person, a candidate option or a form control for the user. A `field_remapped` entry was proven by the script: disclose it. Never add a `--map` for `via: renamed` or `validator`; for `via: mapped`, keep exactly the `--map` the user approved.
 - Treat every value as specific to this request. Never reuse people or selections from an earlier request.
 - Show the full terms and get explicit acceptance right before every `submit`. Acceptance is a new user message sent after the complete terms of this exact plan were shown. The original request, an earlier acceptance, "I accept whatever, just submit", a tool approval or autopilot mode is not acceptance: show the terms and wait. Pass only the `terms.sha` of the plan the user just reviewed.
-- Send once. Rerun the same `submit` only after `not_submitted` or an `ok: false` error. After `rejected`, fix the values, re-plan, get acceptance again and submit the new plan. Never submit again after `unknown` or `already_submitted`, even if the user says "try again".
+- Send once. Rerun the same `submit` only after `not_submitted` or an `ok: false` error, and only after showing that plan's terms again and getting a new acceptance. After `rejected`, fix the values, re-plan and get acceptance for the new plan. Never submit again after `unknown` or `already_submitted`, even if the user says "try again". The one exception is in the `already_submitted` row below.
 - Pass `--allow-duplicate` only after the user saw the matching requests and explicitly asked for another one.
 - `--map <field>=<id>` and `--field <id>=<value>` are expert overrides. Use them only with the exact control and value the user approved.
 - Never edit or delete the skill's state files. Never ask for or handle passwords or MFA codes.
@@ -49,8 +49,8 @@ Run `node <skill>/scripts/mcaps-subscription.mjs <command>`, where `<skill>` is 
 
 | `missing` code | Do this |
 |---|---|
-| (none) | Ask the user for `field` (`label`), offering its `options`. |
-| `unknown_required_field` | The portal added a required field. Ask the user for a value for `label`, then re-plan with `--field <id>=<value>`. |
+| (none) | Ask the user for `field` (`label`), offering its `options`. A reply that clearly names exactly one shown option ("the demo one") is the user's choice: re-plan with that option's exact label. Otherwise ask again. |
+| `unknown_required_field` | The portal added a required field. Show its `label`, `id` and `options`. Only after the user approves that field and gives its value, re-plan with `--field <id>=<value>`. |
 | `field_drift` | A form control changed and could not be proven. Show `label`, `suggested` with its `evidence` and `candidates`, when present (with `p` when `rankedBy` is `systemone`; a ranking is never proof). Re-plan with `--map <field>=<id>` only for the control the user picks. Otherwise stop. |
 | `field_absent` | The control is gone from the form. Report that the skill needs an update and stop. |
 
@@ -98,8 +98,8 @@ Run `node <skill>/scripts/mcaps-subscription.mjs <command>`, where `<skill>` is 
 |---|---|
 | `plan_no_longer_ready` | Handle its `missing`, `errors` and `blockers` as in plan results, then re-plan. |
 | `plan_mismatch`, `form_changed`, `submit_body_mismatch` | The form changed since the plan. Re-plan, present the new plan and terms, and ask again. |
-| `duplicate_active` | Show `requests`. Use `--allow-duplicate` only if the user explicitly asks for another request. |
-| `duplicate_check_failed`, `not_delivered`, `terms_ui_failed`, `no_post`, `error` | Report `message`. With the user's agreement, run the same `submit` again (for `not_delivered`, after checking the network or VPN). |
+| `duplicate_active` | Show `requests`. Only if the user explicitly asks for another request: show the terms again, get acceptance, and run the same `submit` with `--allow-duplicate`. |
+| `duplicate_check_failed`, `not_delivered`, `terms_ui_failed`, `no_post`, `error` | Report `message`. If the user wants to retry (for `not_delivered`, after checking the network or VPN): show the terms again, get acceptance, and run the same `submit` once. |
 | `validation_failed`, `submit_contract_changed` | Report `failures` or the change. Stop (the skill may need an update). |
 
 ## Errors (`ok: false`)
@@ -113,7 +113,7 @@ Run `node <skill>/scripts/mcaps-subscription.mjs <command>`, where `<skill>` is 
 | `bad_args` | Fix the command using [references/CLI.md](references/CLI.md). |
 | `plan_invalid`, `plan_mismatch` | The plan expired, was changed or belongs to another portal. Re-plan, present it, and ask again. |
 | `terms_not_accepted` | The sha does not match the plan. Show that plan's terms again and ask for acceptance. |
-| `already_submitted` | A submission of this request is journaled (sent, in progress or unresolved). Report `previous` and run `status`. Never retry and never touch the journal, unless `previous.outcome` is `success` and the user explicitly wants a second identical subscription: then re-plan, present it and submit with `--allow-duplicate`. |
-| `guard_unavailable`, `form_lost`, `navigation_failed`, `portal_timeout`, `browser_unresponsive`, `cdp_timeout`, `api_failed`, `contact_unknown`, `error` | Transient. Re-run the same command once (for `submit`, the journal refuses anything already sent). If it repeats, report and stop. |
+| `already_submitted` | A submission of this request is journaled (sent, in progress or unresolved). Report `previous` and run `status`. Never retry and never touch the journal, unless `previous.outcome` is `success` and the user explicitly wants a second identical subscription: then re-plan, present it with its terms, get acceptance and submit with `--allow-duplicate`. |
+| `guard_unavailable`, `form_lost`, `navigation_failed`, `portal_timeout`, `browser_unresponsive`, `cdp_timeout`, `api_failed`, `contact_unknown`, `error` | Transient. Re-run the same command once (for `submit`, show the terms again and get acceptance first; the journal refuses anything already sent). If it repeats, report and stop. |
 
 `status --case <id>` returns `found: false` when the case is not visible yet: say so and check again later. Never resubmit because of it.
