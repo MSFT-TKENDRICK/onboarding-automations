@@ -622,6 +622,14 @@ describe('System One drift assist: proofs authorize, probabilities rank', { skip
     assert.equal(none.out.inferred, undefined);
   }));
 
+  it('reports field_absent when the control is gone and nothing legal remains, even with a model', () => withFake({ drift: { removeField: 'desitsm_timezonelist' } }, (q) => answer(q, { none: 0.99 }), async (sc, fake) => {
+    useModel(sc, fake);
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'needs_input', JSON.stringify(p.out));
+    assert.deepEqual(p.out.missing.find((m) => m.field === 'timezone'), { field: 'timezone', code: 'field_absent', expectedId: 'desitsm_timezonelist', message: p.out.missing.find((m) => m.field === 'timezone')?.message });
+    assert.ok(!names(fake).includes('field_timezone'), 'absence is proven by enumeration, never by a model');
+  }));
+
   it('never remaps or infers the owner', () => withFake({ drift: { rename: { desitsm_subscriptionowner: 'desitsm_owner_v2' } } }, (q) => answer(q, { c1: 0.99 }), async (sc, fake) => {
     useModel(sc, fake);
     const p = await plan(sc);
