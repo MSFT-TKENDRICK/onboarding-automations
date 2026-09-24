@@ -2,8 +2,10 @@
 import { pageSession } from './cdp.mjs';
 import { launchBrowser } from './browser.mjs';
 import { createGuard, isInfraName } from './guard.mjs';
-import { resolveSlot, fingerprint, isChoiceField, validateMap } from './resolve.mjs';
+import { resolveSlot, fingerprint, isChoiceField, validateMap, CANON } from './resolve.mjs';
 import { matchOption, matchOwner, ownerSearchTerm, normalize } from './match.mjs';
+import { redactor } from './systemone.mjs';
+import { INTENT_SLOTS, optionCriteria, decideIntent } from './intent.mjs';
 import { DEFAULT_TYPE, highestAmount, onlyOption, defaultTitle } from './defaults.mjs';
 import { planId as hashPlan, sha256, stableStringify, requestKey, acquireSubmitLock, markSent, recordOutcome, releaseUnsent } from './plan-store.mjs';
 import * as P from './page.mjs';
@@ -34,6 +36,18 @@ const TERMS_BOX = 'desitsm_agreetothetermsandconditions';
 const ID_BOUND = new Set([F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, TERMS_BOX, `${TERMS_BOX}One`]);
 // Dependents the selected type is expected to show: if one of these is gone, that is drift, not "does not apply".
 const APPLIES = { internal: ['allowance', 'timezone'], external: ['tenantType', 'tenantLicensing', 'tenantName'] };
+// What each slot means, for System One questions (static text: never user or page data).
+const SLOT_DESC = {
+  title: 'the free-text title of the request', purpose: 'the business purpose category of the subscription', type: 'whether the subscription is internal or external',
+  owner: 'the person who will own the subscription', allowance: 'the monthly spending allowance', timezone: 'the time zone of the subscription',
+  tenantType: 'the kind of tenant for an external subscription', tenantLicensing: 'the licensing of the tenant for an external subscription', tenantName: 'the display name of the new tenant',
+};
+// System One ranking of drift candidates: at most this many controls per question; a leader is only suggested at
+// this confidence and margin (it is still never applied without the user's --map).
+const RANK_MAX = 20;
+const SUGGEST_P = 0.85;
+const SUGGEST_MARGIN = 0.3;
+const round3 = (p) => Math.round(p * 1000) / 1000;
 const crlf = (v) => String(v).replace(/\r?\n|\r/g, '\r\n');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -349,38 +363,114 @@ export async function fill(s, input, opts) {
   }
 }
 
-async function fillForm(s, input, { discover = false, defaults = true, timeZone = null } = {}) {
+// systemOne: an optional System One client (plan only; submit never passes one). It ranks drift candidates and may
+// resolve a user's own wording to one live option for INTENT_SLOTS; it never selects a field.
+async function fillForm(s, input, { discover = false, defaults = true, timeZone = null, systemOne = null } = {}) {
   const t0 = now();
   const timings = {};
   const lap = (k) => { timings[k] = Math.round(now() - t0); s.log(`fill ${k} ${timings[k]}ms`); };
-  const out = { resolved: {}, derived: {}, defaulted: [], missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
+  const out = { resolved: {}, derived: {}, defaulted: [], inferred: [], missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
   // The effective input: what the user gave plus every applied default, made explicit so submit replays it exactly.
   const eff = { ...input, fields: { ...(input.fields ?? {}) }, map: { ...(input.map ?? {}) } };
   const call = (fn, ...a) => s.page.call(fn, ...a);
   const drainModals = async () => { classifyModals(await call(P.takeModals), out); await call(P.hideModals); };
   let fields = byId(await call(P.snapshotFields));
-  const refresh = async () => { fields = byId(await call(P.snapshotFields)); };
+  // Page_Validators of the current snapshot, read only when a slot failed deterministic resolution.
+  let validators = null;
+  const refresh = async () => { fields = byId(await call(P.snapshotFields)); validators = null; };
   // Resolution state: slot -> {id, name, fp} of the control it was bound to; ids no other slot may take.
   const fieldMap = {};
   const claimed = new Set();
   const unresolved = [];
+  const drifts = [];
+  // Never a legal candidate for `key`: other slots' own controls, id-bound companions, other explicit targets.
+  const reservedFor = (key) => new Set([
+    ...Object.entries(SLOT_ID).filter(([k]) => k !== key).map(([, id]) => id), ...ID_BOUND, F.requester, F.manager,
+    ...Object.entries(input.map ?? {}).filter(([k]) => k !== key).map(([, id]) => id), ...Object.keys(input.fields ?? {}),
+  ]);
+  // Everything that could identify a person or the request: masked in every System One payload.
+  const redact = () => {
+    const vals = [input.title, input.owner, input.tenantName, eff.title, eff.owner, ...Object.values(input.fields ?? {}),
+      out.resolved.owner?.upn, out.resolved.owner?.display, ...[F.requester, F.owner, F.manager, F.managerEmail, F.ownerUpn].map((id) => fields[id]?.value)]
+      .filter((v) => typeof v === 'string' && v.trim());
+    return redactor([...vals, ...vals.filter((v) => v.includes('@')).map((v) => v.split('@')[0])]);
+  };
+  const driftMessage = (key, sug) => `The ${key} control changed on the portal.${sug ? ` Likely ${sug.id} ("${sug.label}"): confirm with the user, then rerun with --map ${key}=${sug.id}.` : ' Ask the user which field it is and rerun with --map.'}`;
 
   // Bind a slot against the current snapshot. Returns the id, undefined when the slot is not shown, or null when
-  // the failure was already reported (field_drift in missing, invalid_mapping in errors, form_drift for owner).
-  const bind = (key, { optional = false, applicable = false } = {}) => {
-    const r = resolveSlot(key, SLOT_ID[key], Object.values(fields), { claimed, mapped: input.map?.[key], optional, applicable, given: input[key] !== undefined });
+  // the failure was already reported (field_drift/field_absent in missing, invalid_mapping in errors, form_drift for owner).
+  const bind = async (key, { optional = false, applicable = false } = {}) => {
+    const opts = { claimed, mapped: input.map?.[key], optional, applicable, given: input[key] !== undefined, reserved: reservedFor(key) };
+    let r = resolveSlot(key, SLOT_ID[key], Object.values(fields), opts);
+    // Proofs need the page's validators: read them (read-only) only when a legal candidate could be proven.
+    if (!r.ok && r.code === 'field_drift' && r.pool?.length && key !== 'owner') {
+      validators ??= await call(P.validatorIndex);
+      r = resolveSlot(key, SLOT_ID[key], Object.values(fields), { ...opts, validators });
+    }
     if (r.ok) {
-      fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field) };
+      fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field), ...(r.via === 'validator' ? { proof: sha256(stableStringify({ id: r.id, message: r.evidence.message })) } : {}) };
       claimed.add(r.id);
-      if (r.via !== 'id') out.warnings.push({ code: 'field_remapped', field: key, expectedId: SLOT_ID[key], id: r.id, label: r.field.label, via: r.via });
+      if (r.via !== 'id') out.warnings.push({ code: 'field_remapped', field: key, expectedId: SLOT_ID[key], id: r.id, label: r.field.label, via: r.via, ...(r.via === 'validator' ? { evidence: { message: r.evidence.message.slice(0, 300) } } : {}) });
       return r.id;
     }
     if (r.code === 'not_shown' || (r.code === 'invalid_mapping' && r.reason === 'hidden' && optional && !applicable)) return undefined;
     unresolved.push(r);
     if (r.code === 'invalid_mapping') out.errors.push({ code: 'invalid_mapping', field: key, id: r.id, reason: r.reason, message: `--map ${key}=${r.id} cannot be used (${r.reason}).` });
     else if (key === 'owner') out.blockers.push({ code: 'form_drift', field: 'owner', expectedId: r.expectedId, message: 'The subscription owner control changed on the portal; the driver will not guess it. Update the skill.' });
-    else out.missing.push({ field: key, code: 'field_drift', expectedId: r.expectedId, ...(r.label !== undefined ? { label: r.label } : {}), ...(r.suggested ? { suggested: r.suggested } : {}), candidates: r.candidates, message: `The ${key} control changed on the portal.${r.suggested ? ` Likely ${r.suggested.id} ("${r.suggested.label}"): confirm with the user, then rerun with --map ${key}=${r.suggested.id}.` : ' Ask the user which field it is and rerun with --map.'}` });
+    else if (r.code === 'field_absent') out.missing.push({ field: key, code: 'field_absent', expectedId: r.expectedId, message: `The ${key} control is no longer on the portal form and nothing like it remains. Tell the user; the skill needs an update.` });
+    else {
+      const entry = { field: key, code: 'field_drift', expectedId: r.expectedId, ...(r.label !== undefined ? { label: r.label } : {}), ...(r.suggested ? { suggested: r.suggested } : {}), candidates: r.candidates, message: driftMessage(key, r.suggested) };
+      out.missing.push(entry);
+      if (systemOne && r.pool?.length) drifts.push({ key, entry, pool: r.pool.map((id) => fields[id]).filter(Boolean) });
+    }
     return null;
+  };
+
+  // Probabilities rank: reorder a drift entry's candidates by System One. Never binds, never changes the status.
+  const rankDrift = async ({ key, entry, pool }) => {
+    const mask = redact();
+    const shown = pool.slice(0, RANK_MAX);
+    const truncated = pool.length > shown.length;
+    const criteria = {};
+    const keyToField = {};
+    shown.forEach((f, i) => {
+      const opts = isChoiceField(f) ? (f.options ?? []).filter((o) => o.value !== '' && o.value != null).slice(0, 30).map((o) => mask(o.label).slice(0, 80)) : [];
+      criteria[`c${i + 1}`] = `Control labelled "${mask(f.label || '(no label)').slice(0, 120)}" (${isChoiceField(f) ? 'choice' : 'text'})${opts.length ? `; options: ${opts.join(' | ')}` : ''}`;
+      keyToField[`c${i + 1}`] = f;
+    });
+    criteria.none = truncated ? `None of these controls is the "${CANON[key]}" field.` : `No control on this form is the "${CANON[key]}" field.`;
+    const ans = await systemOne.choose(`field_${key}`, { form: 'Azure subscription request form', field: SLOT_DESC[key] }, `Which form control is the "${CANON[key]}" field (${SLOT_DESC[key]})?`, criteria);
+    if (!ans.ok) { s.log(`systemone field_${key}: ${ans.error}${ans.why ? ` (${ans.why})` : ''}`); return; }
+    const score = new Map(entry.candidates.map((c) => [c.id, c.score]));
+    const ranked = Object.entries(ans.probabilities).filter(([k]) => k !== 'none').map(([k, p]) => ({ f: keyToField[k], p }));
+    entry.candidates = ranked.slice(0, 5).map(({ f, p }) => ({ id: f.id, label: f.label, score: score.get(f.id) ?? 0, p: round3(p) }));
+    entry.rankedBy = 'systemone';
+    entry.pNone = round3(ans.probabilities.none);
+    if (truncated) entry.truncated = { shown: shown.length, total: pool.length };
+    if (ans.choice !== 'none' && ans.p >= SUGGEST_P && ans.margin >= SUGGEST_MARGIN && !truncated) {
+      const f = keyToField[ans.choice];
+      entry.suggested = { id: f.id, label: f.label, evidence: [...(entry.suggested?.id === f.id ? entry.suggested.evidence : []), 'systemone'], p: round3(ans.p) };
+      entry.message = driftMessage(key, entry.suggested);
+    }
+  };
+
+  // A user's own wording for an allowlisted choice slot that matched no single option: ask System One which live
+  // option it means. Commits only a confident, exact option (reported in `inferred` for the user to confirm).
+  const inferOption = async (key, f, wanted, m) => {
+    const mask = redact();
+    const options = (f.options ?? []).filter((o) => o.value !== '' && o.value != null);
+    const { criteria, keyToValue } = optionCriteria(options, mask);
+    const ans = await systemOne.choose(`option_${key}`, { field: SLOT_DESC[key], request: mask(wanted) }, `Which option of the "${CANON[key]}" field does the request mean? Answer none unless one option clearly matches.`, criteria);
+    if (!ans.ok) { s.log(`systemone option_${key}: ${ans.error}${ans.why ? ` (${ans.why})` : ''}`); return null; }
+    const byValue = new Map(options.map((o) => [o.value, o]));
+    const allowed = m.error === 'ambiguous' ? new Set(m.candidates) : null;
+    const ranked = Object.keys(ans.probabilities).filter((k) => k !== 'none').map((k) => byValue.get(keyToValue[k])?.label).filter((l) => l !== undefined && (!allowed || allowed.has(l))).slice(0, 12);
+    const d = decideIntent(ans, keyToValue);
+    const o = d.commit ? byValue.get(d.value) : null;
+    // The committed option must be unambiguous by label, and for an ambiguous match one of the matched options.
+    if (o && options.filter((x) => normalize(x.label) === normalize(o.label)).length === 1 && (!allowed || allowed.has(o.label))) return { commit: true, value: o.value, label: o.label, p: round3(d.p) };
+    s.log(`systemone option_${key}: not committed (${d.reason ?? 'identity'})`);
+    return { commit: false, ranked };
   };
 
   const defaultFor = (key, f) => {
@@ -411,24 +501,29 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     if (wanted === undefined) { out.missing.push(missingEntry(key, id, f)); return false; }
     let value = wanted;
     let label = wanted;
+    let inf = null;
     if (choice) {
       const m = matchOption(f.options, key === 'type' ? (TYPE_ALIASES[normalize(wanted)] ?? wanted) : wanted, { kind });
       // A default that does not map to exactly one option is simply not applied: ask the user instead.
       if (!m.ok && dflt) { out.missing.push(missingEntry(key, id, f)); return false; }
-      if (!m.ok) { out.errors.push({ code: m.error === 'ambiguous' ? 'ambiguous_option' : 'invalid_option', field: key, id, wanted, candidates: m.candidates }); return false; }
-      ({ value, label } = m);
+      if (!m.ok && systemOne && INTENT_SLOTS.has(key) && (m.error === 'no_match' || m.error === 'ambiguous')) inf = await inferOption(key, f, wanted, m);
+      if (!m.ok && !inf?.commit) { out.errors.push({ code: m.error === 'ambiguous' ? 'ambiguous_option' : 'invalid_option', field: key, id, wanted, candidates: inf?.ranked ?? m.candidates, ...(inf?.ranked ? { rankedBy: 'systemone' } : {}) }); return false; }
+      ({ value, label } = m.ok ? m : inf);
     } else if (f.type !== 'text' && f.tag !== 'textarea') {
       out.errors.push({ code: 'unsupported_field', field: key, id, type: f.type }); return false;
     }
     const r = await call(P.setField, id, value);
     if (!r.ok) { out.errors.push({ code: 'set_failed', field: key, id, wanted, detail: r.error ?? `value became ${JSON.stringify(r.value)}` }); return false; }
-    out.resolved[key] = choice ? { value, label } : { value };
+    out.resolved[key] = choice ? { value, label, ...(inf?.commit ? { matchedBy: 'systemone', confidence: inf.p } : {}) } : { value };
     if (dflt) { eff[key] = value; out.defaulted.push({ field: key, value: label, reason: dflt.reason }); }
+    // The exact option replaces the user's wording in the effective input (submit replays it with no model); the
+    // provenance is part of the plan identity.
+    if (inf?.commit) { eff[key] = value; eff.inferred = { ...(eff.inferred ?? {}), [key]: { wanted, value } }; out.inferred.push({ field: key, wanted, value, label, confidence: inf.p }); }
     return true;
   };
 
   // 1) purpose (drives visibility of everything else)
-  const purposeId = bind('purpose');
+  const purposeId = await bind('purpose');
   if (purposeId === null || !(await choose('purpose', purposeId ?? F.purpose))) {
     if (!defaults) for (const k of ['title', 'type', 'owner']) if (input[k] === undefined) out.missing.push({ field: k });
     return finish();
@@ -443,7 +538,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   const ownerDefault = ownerWanted === undefined && defaults ? (await s.state())?.userEmail ?? null : null;
   if (ownerDefault) ownerWanted = ownerDefault;
   const ownerErrors = out.errors.length;
-  const ownerId = bind('owner');
+  const ownerId = await bind('owner');
   if (ownerId === null) { /* form_drift blocker already reported */ }
   else if (ownerWanted === undefined) out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label });
   else if (!fields[F.owner]?.visible) out.errors.push({ code: 'field_unavailable', field: 'owner', id: F.owner });
@@ -476,7 +571,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   await refresh();
 
   // 3) type (runs the portal's eligibility checks against the now-bound owner)
-  const typeId = bind('type');
+  const typeId = await bind('type');
   if (typeId !== null && await choose('type', typeId ?? F.type)) { await s.quiet(); lap('type'); }
   await drainModals();
   await refresh();
@@ -485,7 +580,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   const typeLabel = normalize(out.resolved.type?.label ?? '');
   const applies = new Set(/internal/.test(typeLabel) ? APPLIES.internal : /external/.test(typeLabel) ? APPLIES.external : []);
   for (const [key, , kind] of DEPENDENT) {
-    const id = bind(key, { optional: true, applicable: applies.has(key) });
+    const id = await bind(key, { optional: true, applicable: applies.has(key) });
     if (id === null) continue;
     if (id === undefined) { if (input[key] !== undefined) out.warnings.push({ code: 'input_ignored', field: key, message: `${key} does not apply to the selected subscription type.` }); continue; }
     if (kind === 'text' && input[key] !== undefined) {
@@ -507,7 +602,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
 
   // 5) title last (some handlers reset text fields)
   if (input.title !== undefined && input.title.length > 256) out.errors.push({ code: 'too_long', field: 'title', max: 256 });
-  else { await refresh(); const titleId = bind('title'); if (titleId !== null) await choose('title', titleId ?? F.title); }
+  else { await refresh(); const titleId = await bind('title'); if (titleId !== null) await choose('title', titleId ?? F.title); }
 
   // 6) explicit eligibility (fail closed), independent of the portal's event ordering
   const derived = await call(P.readValues, [F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.owner]);
@@ -525,6 +620,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
 
   async function finish(derivedIn) {
     s.assertGuarded();
+    for (const d of drifts) await rankDrift(d);
     await drainModals();
     await refresh();
     const d = derivedIn ?? await call(P.readValues, [F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.owner]);
@@ -583,6 +679,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     if (discover) out.fields = Object.values(fields).filter((f) => f.visible).map((f) => ({ id: f.id, label: f.label, required: f.required, value: f.value, ...(f.options ? { options: optionsOf(f) } : {}) }));
     out.dialogs = s.dialogs.splice(0);
     out.input = eff;
+    if (!out.inferred.length) delete out.inferred;
     timings.total = Math.round(now() - t0);
     out.timings = timings;
     return out;
@@ -593,7 +690,7 @@ export function planMaterial(formUrl, input, r) {
   return {
     v: PLAN_SCHEMA, formUrl,
     actor: r.contactId,
-    input: { title: input.title, fields: input.fields ?? {}, map: input.map ?? {} },
+    input: { title: input.title, fields: input.fields ?? {}, map: input.map ?? {}, ...(input.inferred ? { inferred: input.inferred } : {}) },
     resolved: Object.fromEntries(Object.entries(r.resolved).map(([k, v]) => [k, k === 'owner' ? v.upn : v.value])),
     derived: { ownerGuid: r.derived.ownerGuid, ownerUpn: r.derived.ownerUpn, manager: r.derived.manager, managerEmail: r.derived.managerEmail },
     fieldMap: r.fieldMap ?? {},
