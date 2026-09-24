@@ -1,0 +1,11 @@
+{
+  "name": "onboarding-automations",
+  "private": true,
+  "description": "Agent Skills for Microsoft employee onboarding. Zero runtime dependencies.",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "test": "node --test --test-concurrency=1 \"tests/**/*.test.mjs\"",
+    "test:unit": "node --test \"tests/**/!(portal.integration).test.mjs\"",
+    "bench": "node tests/request-new-azure-subscription/bench.mjs 5"
+  }
+}
