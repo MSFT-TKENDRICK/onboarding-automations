@@ -3,6 +3,7 @@
 // expected id still checks out or it was purely renamed; anything else is reported (with at most a suggestion)
 // for the user to confirm with --map.
 import { sha256, stableStringify } from './plan-store.mjs';
+import { validatorProof } from './drift.mjs';
 
 export const normLabel = (s) => String(s ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '').toLowerCase();
 const real = (f) => (f.options ?? []).filter((o) => o.value !== '' && o.value != null);
@@ -32,6 +33,8 @@ export const SLOTS = {
 };
 
 export const isChoiceField = (f) => f.tag === 'select' || f.type === 'radio';
+// The canonical (live) label of every slot: what the portal's own validator messages start with.
+export const CANON = Object.fromEntries(Object.entries(SLOTS).map(([k, s]) => [k, s.labels[0]]));
 export function kindOk(kind, f) {
   if (kind === 'choice') return isChoiceField(f);
   if (kind === 'text') return (f.tag === 'input' && f.type === 'text') || f.tag === 'textarea';
@@ -51,7 +54,9 @@ const idOverlap = (a, b) => { const B = idTokens(b); return idTokens(a).some((t)
 
 const SUGGEST_MIN = 3;
 
-export function resolveSlot(key, expectedId, fields, { claimed = new Set(), mapped, optional = false, applicable = false, given = false } = {}) {
+// validators: validatorIndex() output, enabling the validator proof. reserved: ids that are never a legal candidate
+// (other slots' expected ids, id-bound companions, other --map targets).
+export function resolveSlot(key, expectedId, fields, { claimed = new Set(), mapped, optional = false, applicable = false, given = false, validators, reserved = new Set() } = {}) {
   const spec = SLOTS[key];
   if (!spec) throw new Error(`unknown slot ${key}`);
   const byId = new Map(fields.map((f) => [f.id, f]));
@@ -95,13 +100,27 @@ export function resolveSlot(key, expectedId, fields, { claimed = new Set(), mapp
   if (expected && !expected.visible && !(optional && applicable)) return { ok: false, code: 'not_shown', slot: key, expectedId };
   if (!expected && optional && !applicable && !given && !(scored[0]?.score >= SUGGEST_MIN)) return { ok: false, code: 'not_shown', slot: key, expectedId };
 
+  const labelOf = expected ? { label: expected.label } : {};
+  // Legal candidates: every control this slot could be bound to (the same checks --map applies), nothing reserved.
+  const scoreOf = new Map(scored.map((c) => [c.id, c.score]));
+  const legal = fields.filter((f) => usable(f) && sigOk(f) && !reserved.has(f.id))
+    .sort((a, b) => (scoreOf.get(b.id) ?? 0) - (scoreOf.get(a.id) ?? 0) || (a.id < b.id ? -1 : 1));
+  // Absent: the expected id is gone and nothing legal or even similar remains (a changed control is drift, not absent).
+  if (!legal.length && !expected && !scored.length) return { ok: false, code: 'field_absent', slot: key, expectedId };
+  // Proofs authorize: page validators that name this slot's canonical label for exactly one legal control.
+  if (validators && legal.length && spec.renamable !== false && spec.mappable !== false) {
+    const proof = validatorProof(key, validators, new Set(legal.map((f) => f.id)), CANON);
+    if (proof.ok) return { ...hit(byId.get(proof.id), 'validator'), evidence: proof.evidence };
+  }
+
   const [best, second] = scored;
   const suggest = spec.mappable !== false && best && best.score >= SUGGEST_MIN && best.score - (second?.score ?? 0) >= 1;
   return {
     ok: false, code: 'field_drift', slot: key, expectedId,
-    ...(expected ? { label: expected.label } : {}),
+    ...labelOf,
     ...(suggest ? { suggested: { id: best.id, label: best.label, evidence: best.evidence } } : {}),
     candidates: scored.slice(0, 5).map(({ id, label, score }) => ({ id, label, score })),
+    pool: legal.map((f) => f.id),
   };
 }
 
