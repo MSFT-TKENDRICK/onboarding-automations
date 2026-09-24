@@ -388,9 +388,11 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     ...Object.entries(SLOT_ID).filter(([k]) => k !== key).map(([, id]) => id), ...ID_BOUND, F.requester, F.manager,
     ...Object.entries(input.map ?? {}).filter(([k]) => k !== key).map(([, id]) => id), ...Object.keys(input.fields ?? {}),
   ]);
-  // Everything that could identify a person or the request: masked in every System One payload.
+  // Everything that could identify a person or the request: masked in every System One payload. The signed-in user
+  // is read up front: purpose is chosen before the owner defaults to them.
+  const me = systemOne ? await s.state() : null;
   const redact = () => {
-    const vals = [input.title, input.owner, input.tenantName, eff.title, eff.owner, ...Object.values(input.fields ?? {}),
+    const vals = [input.title, input.owner, input.tenantName, eff.title, eff.owner, me?.userEmail, ...Object.values(input.fields ?? {}),
       out.resolved.owner?.upn, out.resolved.owner?.display, ...[F.requester, F.owner, F.manager, F.managerEmail, F.ownerUpn].map((id) => fields[id]?.value)]
       .filter((v) => typeof v === 'string' && v.trim());
     return redactor([...vals, ...vals.filter((v) => v.includes('@')).map((v) => v.split('@')[0])]);

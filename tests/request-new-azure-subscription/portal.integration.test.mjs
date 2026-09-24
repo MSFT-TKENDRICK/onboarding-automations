@@ -667,5 +667,11 @@ describe('System One drift assist: proofs authorize, probabilities rank', { skip
     for (const h of fake.hits) {
       for (const secret of [/testuser/i, /Test User/i, /Zebra/i, /Canary/i, /11111111-1111/, /c0ffee00/i, /contoso/i, /desitsm_/, /budgetdup/]) assert.doesNotMatch(h.raw, secret, `leaked ${secret} in ${h.raw}`);
     }
+    // The owner defaults to the signed-in user after purpose is chosen: their alias is masked all the same.
+    const before = fake.hits.length;
+    const d = await sc.cli('plan', '--title', 'IT lab', '--purpose', 'demo lab for testuser', '--type', 'internal');
+    assert.equal(d.out.errors.find((e) => e.field === 'purpose')?.code, 'invalid_option', JSON.stringify(d.out));
+    assert.equal(fake.hits.length, before + 1);
+    assert.doesNotMatch(fake.hits.at(-1).raw, /testuser/i);
   }));
 });
