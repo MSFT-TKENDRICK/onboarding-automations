@@ -28,10 +28,16 @@ export function parseFormBody(postData, contentType = 'application/x-www-form-ur
     const name = /;\s*name="([^"]*)"/i.exec(head)?.[1];
     if (name === undefined) return null;
     const decoded = name.replace(/%22/g, '"').replace(/%0D/gi, '\r').replace(/%0A/gi, '\n');
-    add(decoded, /;\s*filename=/i.test(head) ? '' : c.slice(sep + 4, -2));
+    // A file part is '' only when it is the empty "no file chosen" part; anything uploaded never matches a value.
+    const file = /;\s*filename=("([^"]*)"|[^;\s]*)/i.exec(head);
+    const content = c.slice(sep + 4, -2);
+    add(decoded, file ? (content === '' && (file[2] ?? file[1]) === '' ? '' : '\u0000file') : content);
   }
   return out;
 }
+
+// ASP.NET state fields and the anti-bot honeypot: present in every POST, never business data.
+export const isInfraName = (name) => /^(__|frm_pref_)/.test(String(name));
 
 export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockResources = true } = {}) {
   const form = new URL(formUrl);
@@ -54,18 +60,20 @@ export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockRe
     const deny = (reason, extra = {}) => { blockedWrites.push({ method: m, host: u.hostname, path: u.pathname, reason, ...extra }); return { action: 'fail', reason }; };
     if (u.origin === form.origin) {
       if (gate && isForm(u) && resourceType === 'Document' && isMainFrame) {
-        if (gate.mustContain.length || gate.mustEqual.length) {
+        if (gate.mustContain.length || gate.mustEqual.length || gate.onlyNames) {
           if (typeof postData !== 'string') return deny('submit-body-unverified');
           const params = parseFormBody(postData, contentType);
           // Markers match the raw body or, for parsed bodies, a decoded field name/value (urlencoding escapes `$`).
           const has = (s) => postData.includes(s) || (!!params && [...params].some(([k, vs]) => k === s || vs.includes(s)));
           if (!gate.mustContain.every(has)) return deny('submit-body-mismatch');
-          // The serialized form must carry exactly the verified value for every bound field (names only are logged).
-          if (gate.mustEqual.length) {
-            if (!params) return deny('submit-body-mismatch', { fields: ['<unparsed body>'] });
-            const bad = gate.mustEqual.filter(([name, value]) => { const got = params.get(name) ?? []; return got.length !== 1 || got[0] !== value; }).map(([name]) => name);
-            if (bad.length) return deny('submit-body-mismatch', { fields: bad });
-          }
+          if ((gate.mustEqual.length || gate.onlyNames) && !params) return deny('submit-body-mismatch', { fields: ['<unparsed body>'] });
+          // The serialized form must carry exactly the verified value(s) for every bound name (names only are logged).
+          const expected = new Map();
+          for (const [name, value] of gate.mustEqual) { if (!expected.has(name)) expected.set(name, []); expected.get(name).push(value); }
+          const bad = [...expected].filter(([name, values]) => { const got = params?.get(name) ?? []; return got.length !== values.length || got.some((v, i) => v !== values[i]); }).map(([name]) => name);
+          // ...and no business name the form did not serialize at arm time.
+          if (gate.onlyNames) for (const name of params.keys()) if (!gate.onlyNames.has(name) && !isInfraName(name) && !bad.includes(name)) bad.push(name);
+          if (bad.length) return deny('submit-body-mismatch', { fields: bad });
         }
         gate = null;
         submitsSent++;
@@ -80,7 +88,8 @@ export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockRe
 
   return {
     classify,
-    armSubmit({ mustContain = [], mustEqual = [] } = {}) { gate = { mustContain, mustEqual }; },
+    // onlyNames: the names the form serialized at arm time; any other non-infrastructure name is refused.
+    armSubmit({ mustContain = [], mustEqual = [], onlyNames = null } = {}) { gate = { mustContain, mustEqual, onlyNames: onlyNames ? new Set(onlyNames) : null }; },
     disarm() { gate = null; },
     get armed() { return !!gate; },
     stats: () => ({ submitsSent, blockedResources, blockedWrites: blockedWrites.slice() }),

@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createGuard } from '../../skills/request-new-azure-subscription/scripts/lib/guard.mjs';
+import { createGuard, isInfraName } from '../../skills/request-new-azure-subscription/scripts/lib/guard.mjs';
 
 const FORM = 'https://portal.example.com/support/eslabs-newazuresubscription/?ServiceId=abc';
 const g = () => createGuard({ formUrl: FORM });
@@ -152,4 +152,51 @@ test('bound fields are checked in multipart/form-data bodies (the portal form en
   assert.equal(unknownType.reason, 'submit-body-mismatch');
   const good = guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp({ 'p$owner': '1111-guid', 'p$title': 'Line one\r\nline & two=3', other: '' }) });
   assert.equal(good.reason, 'submit');
+});
+
+test('infrastructure names are ASP.NET state fields and the honeypot only', () => {
+  for (const n of ['__VIEWSTATE', '__EVENTTARGET', '__RequestVerificationToken', 'frm_pref_ab12cd34']) assert.equal(isInfraName(n), true, n);
+  for (const n of ['ctl00$x$apitil_title', 'ctl00$x$__RoutingMode', 'x__y', 'desitsm_frm_pref_x']) assert.equal(isInfraName(n), false, n);
+});
+
+test('onlyNames denies a POST that carries any business name not serialized at arm time', () => {
+  const body = (o) => new URLSearchParams(o).toString();
+  const guard = g();
+  guard.armSubmit({ mustEqual: [['p$title', 'T']], onlyNames: ['p$title', 'p$empty'] });
+  const extra = guard.classify({ ...req('POST', FORM, 'Document'), postData: body({ 'p$title': 'T', 'p$injected': 'evil', __EVENTTARGET: 'btn' }) });
+  assert.equal(extra.reason, 'submit-body-mismatch');
+  assert.deepEqual(guard.stats().blockedWrites.at(-1).fields, ['p$injected']);
+  assert.ok(!JSON.stringify(guard.stats()).includes('evil'), 'values are never recorded');
+  const unparsed = guard.classify({ ...req('POST', FORM, 'Document'), contentType: 'text/plain', postData: 'p$title=T' });
+  assert.equal(unparsed.reason, 'submit-body-mismatch');
+  // Infrastructure (ASP.NET state, honeypot) is allowed even when it was not listed.
+  const ok = guard.classify({ ...req('POST', FORM, 'Document'), postData: body({ 'p$title': 'T', 'p$empty': '', __EVENTTARGET: 'btn', __VIEWSTATE: 'v', frm_pref_x: '' }) });
+  assert.equal(ok.reason, 'submit');
+});
+
+test('onlyNames alone still requires a parsable body', () => {
+  const guard = g();
+  guard.armSubmit({ onlyNames: ['a'] });
+  assert.equal(guard.classify(req('POST', FORM, 'Document')).reason, 'submit-body-unverified');
+});
+
+test('mustEqual with repeated names compares the ordered list of values (multiplicity included)', () => {
+  const guard = g();
+  guard.armSubmit({ mustEqual: [['p$multi', 'a'], ['p$multi', 'b'], ['p$one', 'x']] });
+  const post = (qs) => guard.classify({ ...req('POST', FORM, 'Document'), postData: qs });
+  assert.equal(post('p%24multi=a&p%24one=x').reason, 'submit-body-mismatch');
+  assert.equal(post('p%24multi=b&p%24multi=a&p%24one=x').reason, 'submit-body-mismatch');
+  assert.equal(post('p%24multi=a&p%24multi=b&p%24multi=b&p%24one=x').reason, 'submit-body-mismatch');
+  assert.equal(post('p%24multi=a&p%24multi=b&p%24one=x').reason, 'submit');
+});
+
+test('a multipart file part with a filename or content never matches an expected empty value', () => {
+  const B = 'bnd';
+  const contentType = `multipart/form-data; boundary=${B}`;
+  const mp = (head, content) => `--${B}\r\nContent-Disposition: form-data; name="att"${head}\r\n\r\n${content}\r\n--${B}--\r\n`;
+  const guard = g();
+  guard.armSubmit({ mustEqual: [['att', '']] });
+  assert.equal(guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp('; filename="x.txt"\r\nContent-Type: text/plain', 'data') }).reason, 'submit-body-mismatch');
+  assert.equal(guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp('; filename=""\r\nContent-Type: application/octet-stream', 'data') }).reason, 'submit-body-mismatch');
+  assert.equal(guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp('; filename=""\r\nContent-Type: application/octet-stream', '') }).reason, 'submit');
 });
