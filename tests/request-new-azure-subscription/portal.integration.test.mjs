@@ -415,3 +415,106 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     assert.notEqual(forced.out.caseId, 'REQ-100001-2026');
   }));
 });
+
+describe('form drift: resolve renamed/relabeled controls without weakening the POST binding', { skip, concurrency: 2, timeout: 600000 }, () => {
+  const remapped = (out, field) => out.warnings.find((w) => w.code === 'field_remapped' && w.field === field);
+
+  it('heals pure renames (timezone, allowance) and posts under the new names', () => with_({ drift: { rename: { desitsm_timezonelist: 'desitsm_tz_v2', desitsm_monthlyspend: 'desitsm_allowance_v2' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.deepEqual(remapped(p.out, 'timezone'), { code: 'field_remapped', field: 'timezone', expectedId: 'desitsm_timezonelist', id: 'desitsm_tz_v2', label: 'Time Zone', via: 'renamed' });
+    assert.equal(remapped(p.out, 'allowance')?.id, 'desitsm_allowance_v2');
+    assert.equal(p.out.resolved.timezone.value, 'tz-pst');
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    const sub = sc.m.state.submissions[0];
+    assert.equal(sub.desitsm_tz_v2, 'tz-pst');
+    assert.equal(sub.desitsm_allowance_v2, '500');
+    assert.equal(sub.desitsm_timezonelist, undefined);
+  }));
+
+  it('finds a renamed purpose select by its label (form readiness and resolution)', () => with_({ drift: { rename: { desitsm_subscriptionpurposeaz: 'desitsm_purpose_v2' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.equal(remapped(p.out, 'purpose')?.id, 'desitsm_purpose_v2');
+    assert.equal(p.out.resolved.purpose.label, 'Hybrid (Self-Learning/Demo)');
+  }));
+
+  it('never guesses a relabeled control: field_drift with a suggestion, ready only with --map', () => with_({ drift: { relabel: { desitsm_timezonelist: 'Local Time' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'needs_input', JSON.stringify(p.out));
+    assert.equal(p.out.resolved.timezone, undefined);
+    const d = p.out.missing.find((m) => m.code === 'field_drift');
+    assert.equal(d.field, 'timezone');
+    assert.equal(d.expectedId, 'desitsm_timezonelist');
+    assert.equal(d.suggested?.id, 'desitsm_timezonelist', JSON.stringify(d));
+    assert.ok(!p.out.missing.some((m) => m.code === 'unknown_required_field'), JSON.stringify(p.out.missing));
+    const ok = await plan(sc, 'IT lab', ['--map', 'timezone=desitsm_timezonelist']);
+    assert.equal(ok.out.status, 'ready', JSON.stringify(ok.out));
+    assert.equal(remapped(ok.out, 'timezone')?.via, 'mapped');
+    assert.equal(ok.out.resolved.timezone.value, 'tz-pst');
+    assert.notEqual(ok.out.planId, undefined);
+  }));
+
+  it('rejects a --map to a derived or foreign field before starting the browser', () => with_({}, async (sc) => {
+    const r = await plan(sc, 'IT lab', ['--map', 'timezone=itserv_businessmanageruserid']);
+    assert.equal(r.code, 1);
+    assert.equal(r.out.error, 'invalid_mapping');
+    const t = await plan(sc, 'IT lab', ['--map', 'timezone=apitil_title']);
+    assert.equal(t.out.error, 'invalid_mapping', JSON.stringify(t.out));
+    assert.equal(sc.m.state.requests, 0);
+  }));
+
+  it('refuses a --map that fails the live checks (option signature)', () => with_({ drift: { relabel: { desitsm_timezonelist: 'Local Time' }, extraRequired: { id: 'desitsm_costcenter', label: 'Cost Center' } } }, async (sc) => {
+    const r = await plan(sc, 'IT lab', ['--map', 'timezone=desitsm_costcenter']);
+    assert.equal(r.out.status, 'invalid', JSON.stringify(r.out));
+    assert.ok(r.out.errors.some((e) => e.code === 'invalid_mapping' && e.field === 'timezone' && e.reason === 'signature'), JSON.stringify(r.out.errors));
+    assert.equal(r.out.resolved.timezone, undefined);
+  }));
+
+  it('a rename between plan and submit is a plan_mismatch; nothing is sent', () => with_({}, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready');
+    sc.m.state.config.drift = { rename: { desitsm_timezonelist: 'desitsm_tz_v2' } };
+    const s = await submit(sc, p);
+    assert.equal(s.out.reason, 'plan_mismatch', JSON.stringify(s.out));
+    assert.ok(s.out.changes.some((c) => c.path.startsWith('fieldMap.timezone')), JSON.stringify(s.out.changes));
+    assert.equal(sc.m.state.submissions.length, 0);
+  }));
+
+  it('a new default-populated business field after plan is a plan_mismatch', () => with_({}, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready');
+    sc.m.state.config.drift = { extraPopulated: { id: 'desitsm_costcenter', value: 'CC-42' } };
+    const s = await submit(sc, p);
+    assert.equal(s.out.reason, 'plan_mismatch', JSON.stringify(s.out));
+    assert.ok(s.out.changes.some((c) => c.path.startsWith('postNames')), JSON.stringify(s.out.changes));
+    assert.equal(sc.m.state.submissions.length, 0);
+  }));
+
+  it('blocks the POST when a click-time script writes an unbound business field', () => with_({ drift: { clickTamper: { name: 'desitsm_treeview', value: 'CEO==>Someone Else' } } }, async (sc) => {
+    const p = await plan(sc);
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'not_submitted', JSON.stringify(s.out));
+    assert.equal(s.out.reason, 'submit_body_mismatch');
+    assert.ok(s.out.fields.includes('desitsm_treeview'), JSON.stringify(s.out.fields));
+    assert.equal(sc.m.state.submissions.length, 0);
+  }));
+
+  it('never heals the owner control', () => with_({ drift: { rename: { desitsm_subscriptionowner: 'desitsm_owner_v2' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));
+    assert.ok(p.out.blockers.some((b) => b.code === 'form_drift' && b.field === 'owner' && b.expectedId === 'desitsm_subscriptionowner'), JSON.stringify(p.out.blockers));
+    assert.equal(p.out.resolved.owner, undefined);
+    assert.ok(!p.out.warnings.some((w) => w.code === 'field_remapped' && w.field === 'owner'));
+  }));
+
+  it('two controls with the slot label: drift, no suggestion', () => with_({ drift: { rename: { desitsm_timezonelist: 'desitsm_tzone' }, duplicateLabel: { of: 'desitsm_timezonelist', id: 'desitsm_tzdup' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'needs_input', JSON.stringify(p.out));
+    const d = p.out.missing.find((m) => m.code === 'field_drift' && m.field === 'timezone');
+    assert.ok(d, JSON.stringify(p.out.missing));
+    assert.equal(d.suggested, undefined);
+    assert.deepEqual(d.candidates.map((c) => c.id).sort(), ['desitsm_tzdup', 'desitsm_tzone']);
+  }));
+});

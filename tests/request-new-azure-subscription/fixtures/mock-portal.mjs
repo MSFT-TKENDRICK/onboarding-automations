@@ -43,8 +43,9 @@ export const DEFAULTS = {
 const ALL_PURPOSES = [['444350001', 'Hybrid (Self-Learning/Demo)'], ['444350003', 'CSS Support'], ['444350004', 'Customer Project']];
 
 function page(cfg, { error } = {}) {
+  const d = cfg.drift;
   const honeypot = `frm_pref_${randomUUID().slice(0, 8)}`;
-  const row = (id, label, control, hidden = true) => `<tr${hidden ? ' style="display:none"' : ''}><td class="clearfix cell"><div class="info"><label id="${id}_label" for="${id}">${label}</label></div><div class="control">${control}</div></td></tr>`;
+  const row = (id, label, control, hidden = true) => `<tr${hidden ? ' style="display:none"' : ''}><td class="clearfix cell"><div class="info"><label id="${id}_label" for="${id}">${d.relabel?.[id] ?? label}</label></div><div class="control">${control}</div></td></tr>`;
   const sel = (id, opts) => `<select id="${id}" name="${P}${id}" class="form-control">${opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
   const txt = (id, extra = '') => `<input type="text" id="${id}" name="${P}${id}" class="text form-control" ${extra}/>`;
   const hid = (id, v = '') => `<input type="hidden" id="${id}" name="${P}${id}" value="${v}"/>`;
@@ -62,11 +63,14 @@ function page(cfg, { error } = {}) {
     cfg.drift.removeField === 'desitsm_timezonelist' ? '' : row('desitsm_timezonelist', 'Time Zone', sel('desitsm_timezonelist', [['', 'Select'], ...cfg.timezones])),
     cfg.drift.extraRequired ? row(cfg.drift.extraRequired.id, cfg.drift.extraRequired.label, sel(cfg.drift.extraRequired.id, [['', 'Select'], ['1', 'Yes'], ['2', 'No']])) : '',
     row(honeypot, 'Leave this field blank', `<input type="text" id="${honeypot}" name="${honeypot}"/>`, false),
-  ].join('');
+  ];
+  // A second control with the same label and options as `of` (shown together with it).
+  if (d.duplicateLabel) { const src = rows.find((r) => r.includes(`id="${d.duplicateLabel.of}"`)); if (src) rows.push(src.replaceAll(d.duplicateLabel.of, d.duplicateLabel.id)); }
   const hidden = [hid('apitil_contact', cfg.me.contactId), hid('apitil_service', SERVICE), hid('itserv_businessmanageruserid'), hid('itserv_businessmanager', cfg.me.upn),
     hid('desitsm_eslabs_projectlevelemailid'), hid('desitsm_aduserguid'), hid('desitsm_treeview'), hid('desitsm_estimatedmonthlyspend'),
+    ...(d.extraPopulated ? [hid(d.extraPopulated.id, d.extraPopulated.value)] : []),
     `<input type="checkbox" id="desitsm_agreetothetermsandconditions" name="${P}desitsm_agreetothetermsandconditions" style="display:none"/>`].join('');
-  return `<!doctype html><html><head><title>Request New Cloud Services - MCAPS Services</title></head><body>
+  return renameIds(d, `<!doctype html><html><head><title>Request New Cloud Services - MCAPS Services</title></head><body>
 <div id="pageLoaderOverlay" style="display:block">Loading...</div>
 <span class="ui-autocomplete-loading"></span>
 <form id="liquid_form" method="post" enctype="multipart/form-data" action="${FORM_PATH}?ServiceId=${SERVICE}" onsubmit="javascript:return WebForm_OnSubmit();">
@@ -74,13 +78,20 @@ function page(cfg, { error } = {}) {
 <input type="hidden" name="__VIEWSTATE" id="__VIEWSTATE" value="${randomUUID()}${randomUUID()}"/><input type="hidden" name="__EVENTVALIDATION" value="${randomUUID()}"/>
 <input type="hidden" name="__RequestVerificationToken" value="${randomUUID()}"/>
 ${error ? `<div id="ValidationSummaryEntityFormView" class="validation-summary alert alert-error"><ul><li>${error}</li></ul></div>` : '<div id="ValidationSummaryEntityFormView" class="validation-summary" style="display:none"><ul></ul></div>'}
-<table class="section">${rows}</table>${hidden}
+<table class="section">${rows.join('')}</table>${hidden}
 <a href="#" onclick="showTermsAndConditionModal();return false;">Terms and Conditions</a>
 <div class="actions"><input type="button" id="InsertButton" name="${INSERT}" value="Submit" disabled="disabled" onclick="javascript:if(typeof entityFormClientValidate === 'function'){if(entityFormClientValidate()){if(typeof Page_ClientValidate === 'function'){if(Page_ClientValidate('')){this.value = 'Processing...';}}}else{return false;}};WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;${INSERT}&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, true))"/></div>
 </form>
 <script>window.Microsoft = { Dynamic365: { Portal: { User: ${JSON.stringify({ contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn })} } } };</script>
-<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null })};</script>
-<script src="/mock-portal.js"></script></body></html>`;
+<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null })};</script>
+<script src="/mock-portal.js"></script></body></html>`);
+}
+
+// drift.rename {oldId: newId}: the portal renamed a control (id, name, label-for and every script reference).
+function renameIds(drift, text) {
+  let out = text;
+  for (const [from, to] of Object.entries(drift.rename ?? {})) out = out.replace(new RegExp(`(?<![A-Za-z0-9_])${from}(?![A-Za-z0-9])`, 'g'), to);
+  return out;
 }
 
 // Runs in the browser. Plain ES5-style code, no template literals.
@@ -125,6 +136,8 @@ let subscriptionPurposeOptions = '';
   window.WebForm_OnSubmit = function () {
     // Hostile: page script rewrites the owner at serialization time (after every client-side check).
     if (C.tamperOwner) $id('itserv_businessmanageruserid').value = C.tamperOwner;
+    // Hostile: a click-time script writes a business field nothing binds by id.
+    if (C.clickTamper) $id(C.clickTamper.name).value = C.clickTamper.value;
     return window.Page_IsValid !== false;
   };
   window.WebForm_PostBackOptions = function (t, a, v) { this.eventTarget = t; this.validation = v; };
@@ -170,6 +183,7 @@ let subscriptionPurposeOptions = '';
     ['desitsm_monthlyspend', 'desitsm_timezonelist'].forEach(function (i) { show(i, internal); });
     ['desitsm_tenanttypes', 'desitsm_tenantlicensing', 'desitsm_tenantdisplayname'].forEach(function (i) { show(i, external); });
     if (C.extraRequired) show(C.extraRequired, internal);
+    if (C.dup) show(C.dup.id, visible(C.dup.of));
     if (external) modal('Note', 'This section is for a dedicated tenant environment with trial licensing.');
     eligibility();
   });
@@ -243,7 +257,7 @@ export async function startMockPortal(overrides = {}) {
     for await (const c of req) chunks.push(c);
     const body = Buffer.concat(chunks);
     if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method)) state.writes.push({ method: req.method, path: u.pathname });
-    if (u.pathname === '/mock-portal.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); return res.end(PAGE_JS); }
+    if (u.pathname === '/mock-portal.js') { res.writeHead(200, { 'content-type': 'text/javascript' }); return res.end(renameIds(cfg.drift, PAGE_JS)); }
     if (u.pathname === '/SignIn') return html(res, `<html><body><form method="post" action="/Account/Login/ExternalLogin?returnUrl=${encodeURIComponent(u.searchParams.get('returnUrl') ?? '/')}"><button name="provider" type="submit" value="https://login.example/">Sign in</button></form></body></html>`);
     if (u.pathname === '/Account/Login/ExternalLogin') { res.writeHead(302, { 'set-cookie': 'mockauth=1; Path=/; HttpOnly', location: u.searchParams.get('returnUrl') || '/' }); return res.end(); }
     if (!authed(req)) {
@@ -280,11 +294,13 @@ export async function startMockPortal(overrides = {}) {
         const fd = await new Response(body, { headers: { 'content-type': req.headers['content-type'] ?? '' } }).formData();
         const fields = Object.fromEntries([...fd.entries()].map(([k, v]) => [k.startsWith(P) ? k.slice(P.length) : k, typeof v === 'string' ? v : '<file>']));
         state.submissions.push(fields);
+        // Posted fields keep their (possibly renamed) names; the oracle reads them through the rename.
+        const get = (k) => fields[cfg.drift.rename?.[k] ?? k];
         const problems = [];
         if (fields.__EVENTTARGET !== INSERT) problems.push('bad event target');
-        if (!fields.apitil_title) problems.push('Title is a required field.');
-        if (!fields.itserv_businessmanageruserid) problems.push('Subscription Owner is a required field.');
-        if (fields.desitsm_agreetothetermsandconditions !== 'on') problems.push('You must agree to the terms.');
+        if (!get('apitil_title')) problems.push('Title is a required field.');
+        if (!get('itserv_businessmanageruserid')) problems.push('Subscription Owner is a required field.');
+        if (get('desitsm_agreetothetermsandconditions') !== 'on') problems.push('You must agree to the terms.');
         if (Object.entries(fields).some(([k, v]) => k.startsWith('frm_pref_') && v)) problems.push('honeypot');
         if (cfg.submitMode === 'reject' || problems.length) { state.lastProblems = problems; return html(res, page(cfg, { error: problems[0] ?? 'Subscription Owner is invalid.' })); }
         if (cfg.submitMode === 'drop-norecord') { req.socket.destroy(); return; }
