@@ -346,7 +346,11 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
 
   const defaultFor = (key, f) => {
     if (!defaults) return null;
-    if (key === 'type') return { value: DEFAULT_TYPE, reason: 'Internal subscription unless the user asks for external' };
+    if (key === 'type') {
+      // Tenant values only apply to External subscriptions: defaulting to Internal would silently drop them.
+      if (['tenantType', 'tenantLicensing', 'tenantName'].some((k) => input[k] !== undefined)) return null;
+      return { value: DEFAULT_TYPE, reason: 'Internal subscription unless the user asks for external' };
+    }
     if (key === 'allowance') { const o = f.tag === 'select' && highestAmount(f.options); return o ? { value: o.value, reason: 'Highest monthly allowance offered' } : null; }
     if (key === 'timezone') return timeZone ? { value: timeZone, reason: `This computer's time zone (${timeZone})` } : null;
     if (key === 'title') { const t = defaultTitle(out.resolved.owner?.upn); return t ? { value: t, reason: "Owner alias and today's date" } : null; }

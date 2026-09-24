@@ -123,6 +123,16 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     assert.ok(!r.out.defaulted.some((d) => d.field === 'timezone'));
   }));
 
+  it('never defaults the type over tenant values the user gave: asks for the type instead', () => with_({}, async (sc) => {
+    const r = await sc.cli('plan', '--purpose', 'Hybrid', '--tenant-name', 'Contoso Lab');
+    assert.equal(r.out.status, 'needs_input', JSON.stringify(r.out));
+    const m = r.out.missing.find((x) => x.field === 'type');
+    assert.ok(m, JSON.stringify(r.out.missing));
+    assert.ok(m.options?.length >= 2, JSON.stringify(m));
+    assert.ok(!r.out.defaulted.some((d) => d.field === 'type'));
+    assert.equal(r.out.planId, undefined);
+  }));
+
   it('--no-defaults asks for every value', () => with_({}, async (sc) => {
     const r = await sc.cli('plan', '--purpose', 'Hybrid', '--no-defaults');
     assert.equal(r.out.status, 'needs_input');

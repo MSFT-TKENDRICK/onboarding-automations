@@ -20,7 +20,7 @@ All portal work goes through one script, `scripts/mcaps-subscription.mjs` (run i
 
    | Field | Default when not given |
    |---|---|
-   | subscription type | `internal` (external needs the tenant fields) |
+   | subscription type | `internal`; asked for instead when tenant values are given (they only apply to external) |
    | monthly allowance | the highest amount offered |
    | owner (alias, email or full name) | the signed-in user |
    | time zone | this computer's zone (`MCAPS_TIMEZONE` overrides); asked for when it matches no single option |

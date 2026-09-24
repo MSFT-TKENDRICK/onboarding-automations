@@ -23,7 +23,7 @@ Every input is optional. Values not given are defaulted and listed in `defaulted
 |---|---|---|
 | `--title` | `<owner alias> Azure subscription <YYYY-MM-DD>` | Up to 256 characters. |
 | `--purpose` | The only option, if exactly one | Matched to the current purpose list: exact value or label first, then a unique substring or all-words match (case-insensitive). Ambiguous → `invalid` with candidates. |
-| `--type` | `internal` | `internal` or `external`. |
+| `--type` | `internal` (none when any `--tenant-*` value is given) | `internal` or `external`. |
 | `--owner` | The signed-in user | Alias, email or full name. Resolved through the portal's own people search. Ambiguous or unknown → candidates. |
 | `--allowance` | The highest amount offered | Monthly allowance, matched to the current list. |
 | `--timezone` | `MCAPS_TIMEZONE`, else this computer's IANA zone | `Pacific Time`, `America/Los_Angeles`, `UTC-08:00`, … |
