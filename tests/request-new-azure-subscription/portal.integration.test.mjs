@@ -94,6 +94,7 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     const purpose = r.out.missing.find((x) => x.field === 'purpose');
     assert.ok(purpose.options.includes('Hybrid (Self-Learning/Demo)'));
     assert.equal(r.out.planId, undefined);
+    assert.match(r.out.next, /Ask the user/);
   }));
 
   it('defaults internal type, highest allowance, self as owner, local time zone and a title', () => with_({}, async (sc) => {
@@ -314,10 +315,12 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     const s = await submit(sc, p);
     assert.equal(s.code, 3, JSON.stringify(s.out));
     assert.equal(s.out.outcome, 'unknown');
+    assert.match(s.out.next, /Do NOT resubmit/);
     assert.equal(sc.m.state.submissions.length, 1);
     sc.m.state.config.submitMode = 'success';
     const again = await submit(sc, p);
     assert.equal(again.out.error, 'already_submitted');
+    assert.match(again.out.next, /Do not retry/);
     assert.equal(sc.m.state.submissions.length, 1);
   }));
 

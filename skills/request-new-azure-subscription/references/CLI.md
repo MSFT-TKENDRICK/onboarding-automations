@@ -76,7 +76,7 @@ All optional. A value not given is defaulted and listed in `defaulted`. A defaul
 |---|---|
 | `ok` | `true` when the command achieved its goal (a ready plan, a successful submit, a found case). |
 | `error`, `message` | On errors (`ok: false`, exit 1): the code (see [Errors](#errors)) and a human message. Some errors add `previous`, `portal`, `state` or `url`. |
-| `next` | On ready plans: what to do next. |
+| `next` | On every result that needs a follow-up (plans, `submit` outcomes, errors, `status --case` not found): the next step, consistent with [SKILL.md](../SKILL.md). A ready plan's `next` never contains the terms sha. |
 | `ms` | Wall time of the run. |
 
 ### `plan`

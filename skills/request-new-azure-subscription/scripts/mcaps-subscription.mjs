@@ -14,17 +14,120 @@ import { systemTimeZone } from './lib/defaults.mjs';
 import { killAllBrowsers } from './lib/browser.mjs';
 import { createSystemOne } from './lib/systemone.mjs';
 
-const HELP = `Usage: node mcaps-subscription.mjs <plan|submit|status|options> [flags]
-Inputs (plan/options), all optional thanks to defaults: --title --purpose --type internal|external
-  --owner <alias|email|full name> --allowance 500 --timezone "Pacific Time" | America/Los_Angeles | UTC-08:00
-  --tenant-type --tenant-licensing --tenant-name  --field <id>=<value> (repeatable)  --json <file|->
-  --map <slot>=<fieldId> (repeatable): bind an input to a renamed/relabeled control, only after the user confirmed a
-  field_drift suggestion. Slots: title purpose type allowance timezone tenantType tenantLicensing tenantName.
-Defaults (reported in "defaulted"): type internal, highest allowance, owner = you, this computer's time zone,
-  title "<alias> Azure subscription <date>", and any field with a single option. --no-defaults asks for everything.
-Submit: --plan <planId> --accept-terms <termsSha> [--allow-duplicate]
-Status: [--case REQ-123456-2026]
-Common: --headed (interactive sign-in)  --ephemeral (throwaway browser profile)  --browser <path>  --verbose  --pretty`;
+export const HELP = `Usage:
+  node mcaps-subscription.mjs plan    [inputs] [common]   Fill the live form with writes blocked, resolve every value,
+                                                          check eligibility, read the terms, save a plan. Never submits.
+  node mcaps-subscription.mjs options [inputs] [common]   Show the visible fields and current options. Saves nothing.
+  node mcaps-subscription.mjs submit  --plan <planId> --accept-terms <terms.sha> [--allow-duplicate] [common]
+  node mcaps-subscription.mjs status  [--case REQ-123456-2026] [common]
+
+Inputs (plan, options). All optional; applied defaults are listed in "defaulted":
+  --title <text>                 default "<owner alias> Azure subscription <YYYY-MM-DD>" (max 256 characters)
+  --purpose <text>               default: the only option, if there is exactly one
+  --type internal|external       default internal
+  --owner <alias|email|name>     default: the signed-in user (matched exactly, never partially)
+  --allowance <amount>           default: the highest monthly allowance offered
+  --timezone <zone>              default: MCAPS_TIMEZONE, else this computer's zone
+                                 ("Pacific Time", America/Los_Angeles or UTC-08:00)
+  --tenant-type <text>           external only; default: the only option, if there is exactly one
+  --tenant-licensing <text>      external only; default: the only option, if there is exactly one
+  --tenant-name <text>           external only (max 50 characters)
+  --field <id>=<value>           repeatable: a required field the portal added (unknown_required_field)
+  --map <slot>=<id>              repeatable: only for the control the user confirmed from a field_drift entry
+                                 slots: title purpose type allowance timezone tenantType tenantLicensing tenantName
+  --json <file|->                the same inputs as one JSON object (flags override it)
+  --no-defaults                  apply no defaults: every value not given is reported in "missing"
+  --full-terms                   include the full terms text even when the plan is not ready
+
+Submit (sends the request once; only after the user explicitly accepted the plan's full terms):
+  --plan <planId>                from a ready plan; expires after 30 minutes
+  --accept-terms <terms.sha>     the terms.sha of that plan
+  --allow-duplicate              only when the user explicitly asked for another request with the same title
+
+Status:
+  --case REQ-123456-2026         only this request (default: your 10 most recent requests)
+
+Common:
+  --headed                       visible browser so the user can finish sign-in (after auth_required)
+  --ephemeral                    throwaway browser profile for this run
+  --browser <path>               Chromium-family browser (default: Edge, then Chrome; env MCAPS_BROWSER)
+  --verbose                      diagnostics on stderr
+  --pretty                       indented JSON
+  -h, --help                     this text
+
+Output: one JSON object on stdout. Follow its "next" hint.
+Exit codes: 0 the command worked (not proof a request exists), 2 needs action or nothing was submitted,
+  3 submit outcome unknown (never resubmit), 1 error.
+
+Examples:
+  node mcaps-subscription.mjs plan
+  node mcaps-subscription.mjs plan --purpose "Hybrid" --owner alias@microsoft.com --allowance 500
+  node mcaps-subscription.mjs submit --plan <planId> --accept-terms <terms.sha>
+  node mcaps-subscription.mjs status --case REQ-123456-2026
+
+Reference: references/CLI.md`;
+
+const TRANSIENT = new Set(['guard_unavailable', 'form_lost', 'navigation_failed', 'portal_timeout', 'browser_unresponsive', 'cdp_timeout', 'api_failed', 'contact_unknown', 'error']);
+const REPLAN = 'Re-run plan, present the new plan and its full terms, and ask the user again.';
+const RETRY_SUBMIT = 'To retry, show the user the terms again, get their explicit acceptance, and run the same submit once.';
+
+// What the agent should do next with a result (mirrors SKILL.md). Undefined when no follow-up is needed.
+export function nextHint(cmd, out) {
+  if (!out || (out.usage && out.ok !== false)) return undefined;
+  if (out.ok === false && out.error) {
+    const e = out.error;
+    if (e === 'bad_args') return 'Fix the command: see --help or references/CLI.md.';
+    if (e === 'invalid_mapping') return 'Drop the --map, or use only a control the user approved from a field_drift entry.';
+    if (e === 'auth_required') return 'Re-run the same command with --headed and let the user finish sign-in in the browser window. Never ask for credentials.';
+    if (e === 'vpn_required' || e === 'portal_unreachable') return 'Ask the user to connect to the corporate network or VPN, then re-run. Nothing was submitted.';
+    if (e === 'non_microsoft_account') return 'Tell the user to sign in with their Microsoft corporate account, and stop.';
+    if (e === 'no_eligible_purpose') return 'Report the portal messages to the user and stop.';
+    if (e === 'plan_invalid' || e === 'plan_mismatch') return REPLAN;
+    if (e === 'terms_not_accepted') return "Show the user this plan's full terms; pass its terms.sha only after they explicitly accept.";
+    if (e === 'already_submitted') return `Do not retry: report previous and run status.${out.previous?.outcome === 'success' ? ' Only if the user explicitly wants a second identical subscription: re-plan, present it with its terms, get acceptance and submit with --allow-duplicate.' : ''}`;
+    if (TRANSIENT.has(e)) return `Retry the same command once${cmd === 'submit' ? ' (show the user the terms again and get their acceptance first; the journal refuses anything already sent)' : ''}. If it fails again, report it and stop.`;
+    return 'Report the message to the user and stop.';
+  }
+  if (cmd === 'plan') {
+    const codes = (list) => new Set((list ?? []).map((x) => x.code));
+    if (out.status === 'ready') {
+      const show = `the resolved${out.defaulted?.length ? ', defaulted' : ''} and derived values, every warning and the full terms`;
+      return [
+        `Show the user ${show}.`,
+        ...(out.inferred?.length ? ['Confirm every inferred value with the user (their wording was matched to an option by a model).'] : []),
+        ...(codes(out.warnings).has('possible_duplicate') ? ['Add --allow-duplicate only if the user saw the matching requests and explicitly wants another one.'] : []),
+        `Only after they explicitly accept these terms: node mcaps-subscription.mjs submit --plan ${out.planId} --accept-terms <terms.sha>`,
+      ].join(' ');
+    }
+    if (out.status === 'needs_input') {
+      const m = out.missing ?? [];
+      const parts = [];
+      if (m.some((x) => !x.code)) parts.push('Ask the user for each missing value, offering its options.');
+      for (const x of m.filter((y) => y.code === 'unknown_required_field')) parts.push(`The portal added the required field "${x.label ?? x.id}": only with the user's approved value, add --field ${x.id}=<value>.`);
+      for (const x of m.filter((y) => y.code === 'field_drift')) parts.push(`The ${x.field} control changed: show its suggested control and candidates and add --map ${x.field}=<id> only for the control the user picks.`);
+      if (m.some((x) => x.code === 'field_absent')) parts.push('A field is gone from the form: tell the user the skill needs an update, and stop.');
+      return [...parts, 'Then re-run plan with the same flags plus the answers. Never pick a value yourself.'].join(' ');
+    }
+    if (out.status === 'invalid') return "Show each errors entry with its candidates or message and ask the user; re-run plan with their corrected values. Never pick a candidate or a person yourself.";
+    if (out.status === 'blocked') return "Report each blocker's message to the user and stop. Do not work around it.";
+    return undefined;
+  }
+  if (cmd === 'submit') {
+    if (out.outcome === 'success') return `Report case ${out.caseId} and its status to the user.`;
+    if (out.outcome === 'rejected') return "Nothing was created. Show the portal's errors verbatim, fix the values with the user, then re-run plan.";
+    if (out.outcome === 'unknown') return `Do NOT resubmit. Tell the user the request may exist; ${out.probableCaseId ? `run status --case ${out.probableCaseId} (found: true confirms it)` : 'run status in a few minutes'} and report what it shows.`;
+    if (out.outcome === 'not_submitted') {
+      const r = out.reason;
+      if (['plan_no_longer_ready', 'plan_mismatch', 'form_changed', 'submit_body_mismatch'].includes(r)) return `Nothing was sent. ${REPLAN}`;
+      if (r === 'duplicate_active') return 'Nothing was sent. Show the matching requests; only if the user explicitly asks for another request, show the terms again, get acceptance and run the same submit with --allow-duplicate.';
+      if (r === 'validation_failed' || r === 'submit_contract_changed') return 'Nothing was sent. Report it to the user and stop; the skill may need an update.';
+      return `Nothing was sent. Report the message.${r === 'not_delivered' ? ' Check the network or VPN.' : ''} ${RETRY_SUBMIT}`;
+    }
+    return undefined;
+  }
+  if (cmd === 'status' && out.found === false) return 'The case is not visible yet: tell the user and check again later. Never resubmit because of it.';
+  return undefined;
+}
 
 const EXIT = { ready: 0, success: 0, ok: 0, needs_input: 2, invalid: 2, blocked: 2, not_submitted: 2, rejected: 2, unknown: 3, error: 1 };
 const PLAN_TTL_MS = 30 * 60 * 1000;
@@ -83,10 +186,18 @@ function publicPlanView(r, { fullTerms }) {
   };
 }
 
-export async function run(argv, { env = process.env, stdinText = () => readFileSync(0, 'utf8') } = {}) {
+export async function run(argv, opts = {}) {
+  const ctx = {};
+  const { code, out } = await execute(argv, opts, ctx);
+  const next = out?.next ?? nextHint(ctx.cmd, out);
+  return { code, out: next ? { ...out, next } : out };
+}
+
+async function execute(argv, { env = process.env, stdinText = () => readFileSync(0, 'utf8') } = {}, ctx = {}) {
   let parsed;
   try { parsed = parse(argv); } catch (e) { return { code: 1, out: { ok: false, error: 'bad_args', message: e.message, usage: HELP } }; }
   const { cmd, v } = parsed;
+  ctx.cmd = cmd;
   if (v.help || !cmd) return { code: v.help ? 0 : 1, out: { usage: HELP } };
   if (!['plan', 'submit', 'status', 'options'].includes(cmd)) return { code: 1, out: { ok: false, error: 'bad_args', message: `Unknown command ${cmd}`, usage: HELP } };
   const formUrl = env.MCAPS_PORTAL_URL || DEFAULT_FORM_URL;
@@ -151,7 +262,7 @@ export async function run(argv, { env = process.env, stdinText = () => readFileS
         const id = hashPlan(material);
         const expiresAt = new Date(Date.now() + PLAN_TTL_MS).toISOString();
         savePlan(dir, { planId: id, createdAt: new Date().toISOString(), expiresAt, formUrl, input: effective, material, terms: { sha: r.terms.sha } });
-        Object.assign(out, { planId: id, expiresAt, next: `Show the user the plan and the full terms.${r.inferred?.length ? ' Confirm every inferred value with the user (their wording was matched to an option by a model).' : ''} Only after they explicitly accept: node mcaps-subscription.mjs submit --plan ${id} --accept-terms <terms.sha>` });
+        Object.assign(out, { planId: id, expiresAt });
       }
       return { code: EXIT[r.status] ?? 1, out };
     }
