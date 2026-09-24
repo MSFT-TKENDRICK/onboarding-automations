@@ -101,14 +101,19 @@ export function nextHint(cmd, out) {
     }
     if (out.status === 'needs_input') {
       const m = out.missing ?? [];
+      if (m.some((x) => x.code === 'field_absent')) return 'A field is gone from the portal form: tell the user the skill needs an update, and stop.';
       const parts = [];
       if (m.some((x) => !x.code)) parts.push('Ask the user for each missing value, offering its options.');
       for (const x of m.filter((y) => y.code === 'unknown_required_field')) parts.push(`The portal added the required field "${x.label ?? x.id}": only with the user's approved value, add --field ${x.id}=<value>.`);
       for (const x of m.filter((y) => y.code === 'field_drift')) parts.push(`The ${x.field} control changed: show its suggested control and candidates and add --map ${x.field}=<id> only for the control the user picks.`);
-      if (m.some((x) => x.code === 'field_absent')) parts.push('A field is gone from the form: tell the user the skill needs an update, and stop.');
       return [...parts, 'Then re-run plan with the same flags plus the answers. Never pick a value yourself.'].join(' ');
     }
-    if (out.status === 'invalid') return "Show each errors entry with its candidates or message and ask the user; re-run plan with their corrected values. Never pick a candidate or a person yourself.";
+    if (out.status === 'invalid') {
+      const e = out.errors ?? [];
+      if (e.some((x) => x.code === 'unsupported_field')) return 'A form control cannot be set by this skill: tell the user the skill needs an update, and stop.';
+      if (e.length && e.every((x) => x.code === 'set_failed' || x.code === 'owner_not_bound')) return 'Re-run plan once with the same flags. If it fails again, report it and stop.';
+      return 'Show each errors entry with its candidates or message and ask the user; re-run plan with their corrected values. Never pick a candidate or a person yourself.';
+    }
     if (out.status === 'blocked') return "Report each blocker's message to the user and stop. Do not work around it.";
     return undefined;
   }

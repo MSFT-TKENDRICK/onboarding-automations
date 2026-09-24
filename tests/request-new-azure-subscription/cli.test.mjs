@@ -74,6 +74,7 @@ describe('nextHint', () => {
     assert.match(drift, /--map timezone=<id>/);
     assert.match(drift, /only for the control the user picks/);
     assert.match(plan('needs_input', { missing: [{ field: 'timezone', code: 'field_absent' }] }), /skill needs an update/);
+    assert.doesNotMatch(plan('needs_input', { missing: [{ field: 'purpose' }, { field: 'timezone', code: 'field_absent' }] }), /re-run plan/i);
     assert.match(plan('needs_input', { missing: [{ field: 'fields.x', code: 'unknown_required_field', id: 'x' }] }), /--field x=<value>/);
   });
 
@@ -81,6 +82,10 @@ describe('nextHint', () => {
     const h = plan('invalid', { errors: [{ code: 'ambiguous_owner', field: 'owner' }] });
     assert.match(h, /candidates/);
     assert.match(h, /Never pick/);
+    const unsupported = plan('invalid', { errors: [{ code: 'invalid_option' }, { code: 'unsupported_field' }] });
+    assert.match(unsupported, /skill needs an update/);
+    assert.doesNotMatch(unsupported, /re-run plan/i);
+    assert.match(plan('invalid', { errors: [{ code: 'set_failed' }, { code: 'owner_not_bound' }] }), /Re-run plan once/);
   });
 
   it('blocked: report and stop', () => {

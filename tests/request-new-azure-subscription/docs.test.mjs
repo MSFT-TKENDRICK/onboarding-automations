@@ -13,7 +13,10 @@ const CLI = read('references/CLI.md');
 const DOCS = { 'SKILL.md': SKILL, ...Object.fromEntries(readdirSync(join(SKILL_DIR, 'references')).filter((f) => f.endsWith('.md')).map((f) => [`references/${f}`, read(`references/${f}`)])) };
 const SCRIPTS = [join('scripts', 'mcaps-subscription.mjs'), ...readdirSync(join(SKILL_DIR, 'scripts', 'lib')).filter((f) => f.endsWith('.mjs')).map((f) => join('scripts', 'lib', f))];
 const SRC = Object.fromEntries(SCRIPTS.map((p) => [basename(p), read(p)]));
-const ALL_SRC = Object.values(SRC).join('\n');
+// Producing code only: HELP and nextHint quote codes they read, which must not make a stale doc row pass.
+const cli = SRC['mcaps-subscription.mjs'];
+const PRODUCING = { ...SRC, 'mcaps-subscription.mjs': cli.slice(0, cli.indexOf('export const HELP')) + cli.slice(cli.indexOf('export async function run')) };
+const ALL_SRC = Object.values(PRODUCING).join('\n');
 
 function frontmatter(md) {
   const m = /^---\r?\n([\s\S]*?)\r?\n---\r?\n/.exec(md);
@@ -36,17 +39,17 @@ function emittedCodes() {
   const codes = new Set(['ready', 'needs_input', 'invalid', 'blocked']);
   const grab = (src, re) => { for (const m of src.matchAll(re)) codes.add(m[1]); };
   for (const f of ['mcaps-subscription.mjs', 'portal.mjs', 'cdp.mjs']) {
-    grab(SRC[f], /\bcode: '([a-z_]+)'/g);
-    grab(SRC[f], /SkillError\('([a-z_]+)'/g);
+    grab(PRODUCING[f], /\bcode: '([a-z_]+)'/g);
+    grab(PRODUCING[f], /SkillError\('([a-z_]+)'/g);
   }
-  grab(SRC['mcaps-subscription.mjs'], /\berror: '([a-z_]+)'/g);
-  grab(SRC['portal.mjs'], /notSent\('([a-z_]+)'/g);
-  grab(SRC['portal.mjs'], /outcome: '([a-z_]+)'/g);
-  grab(SRC['portal.mjs'], /outcome: 'not_submitted', reason: '([a-z_]+)'/g);
+  grab(PRODUCING['mcaps-subscription.mjs'], /\berror: '([a-z_]+)'/g);
+  grab(PRODUCING['portal.mjs'], /notSent\('([a-z_]+)'/g);
+  grab(PRODUCING['portal.mjs'], /outcome: '([a-z_]+)'/g);
+  grab(PRODUCING['portal.mjs'], /outcome: 'not_submitted', reason: '([a-z_]+)'/g);
   // Modal blockers are chosen by a ternary: code: /…/ ? 'active_request' : /…/ ? 'limit_reached' : 'portal_alert'.
-  for (const line of SRC['portal.mjs'].split('\n').filter((l) => l.includes('out.blockers.push({ code: /'))) grab(line, /'([a-z_]+)'/g);
+  for (const line of PRODUCING['portal.mjs'].split('\n').filter((l) => l.includes('out.blockers.push({ code: /'))) grab(line, /'([a-z_]+)'/g);
   // Option and owner errors too: code: m.error === 'ambiguous' ? 'ambiguous_option' : 'invalid_option'.
-  for (const m of SRC['portal.mjs'].matchAll(/code: m\.error === '[a-z_]+' \? '([a-z_]+)' : '([a-z_]+)'/g)) { codes.add(m[1]); codes.add(m[2]); }
+  for (const m of PRODUCING['portal.mjs'].matchAll(/code: m\.error === '[a-z_]+' \? '([a-z_]+)' : '([a-z_]+)'/g)) { codes.add(m[1]); codes.add(m[2]); }
   codes.add('error'); // run()'s fallback for unexpected exceptions
   return codes;
 }
@@ -110,9 +113,9 @@ describe('every code the CLI emits is documented', () => {
     for (const c of ['field_drift', 'field_absent', 'possible_duplicate', 'systemone_refused', 'already_submitted', 'plan_mismatch', 'limit_reached', 'portal_alert', 'ambiguous_option', 'invalid_option', 'ambiguous_owner', 'cdp_timeout', 'not_delivered', 'duplicate_active', 'plan_no_longer_ready']) assert.ok(codes.has(c), c);
   });
 
-  for (const [name, md] of [['SKILL.md (with an action)', SKILL], ['references/CLI.md', CLI]]) {
+  for (const [name, md, cells] of [['SKILL.md (a row of its own, with an action)', SKILL, (row) => row.split('|')[1]], ['references/CLI.md', CLI, (row) => row]]) {
     it(name, () => {
-      const documented = new Set(tableRows(md).flatMap(backticked));
+      const documented = new Set(tableRows(md).map(cells).flatMap(backticked));
       assert.deepEqual([...codes].filter((c) => !documented.has(c)).sort(), []);
     });
   }

@@ -47,6 +47,8 @@ Run `node <skill>/scripts/mcaps-subscription.mjs <command>`, where `<skill>` is 
 | `invalid` | Handle each `errors` entry. |
 | `blocked` | Handle each `blockers` entry. Never work around a blocker. |
 
+If any entry below says stop, stop after reporting all entries.
+
 | `missing` code | Do this |
 |---|---|
 | (none) | Ask the user for `field` (`label`), offering its `options`. A reply that clearly names exactly one shown option ("the demo one") is the user's choice: re-plan with that option's exact label. Otherwise ask again. |
