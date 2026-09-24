@@ -24,7 +24,7 @@ export const HELP = `Usage:
 Inputs (plan, options). All optional; applied defaults are listed in "defaulted":
   --title <text>                 default "<owner alias> Azure subscription <YYYY-MM-DD>" (max 256 characters)
   --purpose <text>               default: the only option, if there is exactly one
-  --type internal|external       default internal
+  --type internal|external       default internal; asked for when a --tenant-* value is given
   --owner <alias|email|name>     default: the signed-in user (matched exactly, never partially)
   --allowance <amount>           default: the highest monthly allowance offered
   --timezone <zone>              default: MCAPS_TIMEZONE, else this computer's zone

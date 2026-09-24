@@ -31,7 +31,7 @@ All optional. A value not given is defaulted and listed in `defaulted`. A defaul
 |---|---|---|
 | `--title <text>` | `<owner alias> Azure subscription <YYYY-MM-DD>` | At most 256 characters. |
 | `--purpose <text>` | The only option, if there is exactly one | Matched to the live list: exact value or label, then a unique substring or all-words match (case-insensitive). |
-| `--type internal\|external` | `internal` | |
+| `--type internal\|external` | `internal`; asked for instead when any `--tenant-*` value is given | Tenant values only apply to external. |
 | `--owner <alias\|email\|full name>` | The signed-in user | Resolved through the portal's people search. Matched exactly (email, alias or full display name), never partially. |
 | `--allowance <amount>` | The highest amount offered | Monthly allowance, matched by amount. |
 | `--timezone <zone>` | `MCAPS_TIMEZONE`, else this computer's IANA zone | A portal label (`Pacific Time`), an IANA name (`America/Los_Angeles`) or an offset (`UTC-08:00`). |
