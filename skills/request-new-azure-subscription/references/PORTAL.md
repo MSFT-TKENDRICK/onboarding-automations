@@ -83,6 +83,32 @@ The browser is driven over `--remote-debugging-pipe` (fds 3/4, NUL-delimited JSO
 Every other write is blocked in both `plan` and `submit`. Telemetry (App Insights SDK/CDN, 1DS, Clarity), images, fonts
 and media are blocked for speed.
 
+## Proving the live assumptions
+
+The driver relies on six facts about the live form that the mock portal cannot prove. A maintainer proves or refutes
+them all at once, read-only, after a `field_drift` or `form_drift` and before first use:
+
+```text
+node scripts/mcaps-subscription.mjs verify --pretty
+```
+
+Add `--headed` if it returns `auth_required`. Connect the VPN first (`vpn_required`). The session cannot arm or send a
+submit, every portal write except sign-in is blocked, and nothing is saved. It fills the form once per purpose × type
+with defaults on, then reads the page's own evidence. Exit 0 only if all six checks pass. Any `false` (refuted) or `null`
+(could not run; see `detail`) gives exit 2: send the whole JSON to the skill maintainers. A pass with
+`portal.live: false` came from `MCAPS_PORTAL_URL` and proves nothing about the live portal.
+
+| # | Assumption | Check |
+|---|---|---|
+| A1 | The form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`); the owner default binds to it. | `portal_user` |
+| A2 | Every Monthly Allowance label parses to an amount and the highest amount is unique; the default selects it. | `allowance_labels` |
+| A3 | Every slot's control has its expected id, exactly once, with its canonical label associated. A label-tolerant or remapped binding fails. | `field_ids` |
+| A4 | An enabled `Page_Validators` entry names each required slot's canonical label with `controltovalidate` on its expected id, and `validatorProof` agrees. | `validators` |
+| A5 | The default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one Time Zone option, with an agreeing UTC offset. | `timezone_default` |
+| A6 | While filling, no POST, PUT, PATCH or DELETE reaches the portal except sign-in during load, confirmed by both the guard's decisions and the browser's own network events. | `writes_blocked` |
+
+Evidence per check is under `verify` in [CLI.md Output](CLI.md#output). Identities are masked to their first 2 characters. Identities are masked to their first 2 characters.
+
 ## Known portal issues
 
 - An existing *active* Internal request for the same owner blocks new Internal requests (`active_request`).

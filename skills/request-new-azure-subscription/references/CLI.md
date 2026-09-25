@@ -9,6 +9,7 @@ node scripts/mcaps-subscription.mjs plan    [inputs] [common]
 node scripts/mcaps-subscription.mjs options [inputs] [common]
 node scripts/mcaps-subscription.mjs submit  --plan <planId> --accept-terms <terms.sha> [--allow-duplicate] [common]
 node scripts/mcaps-subscription.mjs status  [--case REQ-123456-2026] [common]
+node scripts/mcaps-subscription.mjs verify  [--purpose <text>] [--type internal|external] [common]
 node scripts/mcaps-subscription.mjs --help
 ```
 
@@ -20,6 +21,7 @@ Every run prints exactly one JSON object on stdout (`--pretty` indents it). Diag
 | `options` | No (same blocking as `plan`). | Lists the visible fields and their current options for the given selections. Saves nothing. |
 | `submit` | At most one form POST, carrying only the planned values. | Re-verifies the saved plan against the live form, accepts the terms, and posts once. Journaled so the same request is never sent twice. |
 | `status` | No. | Reads your recent requests from the portal Web API. |
+| `verify` | No. Submitting is disabled for the session, and every portal write except sign-in traffic is blocked. | Maintainers: proves the live-portal assumptions the driver relies on (see [PORTAL.md](PORTAL.md#proving-the-live-assumptions)). Saves nothing. |
 
 ## Flags
 
@@ -56,6 +58,15 @@ All optional. A value not given is defaulted and listed in `defaulted`. A defaul
 | Flag | Notes |
 |---|---|
 | `--case REQ-123456-2026` | Ask the server for this request only. Without it, `status` lists your 10 most recent requests. |
+
+### `verify`
+
+| Flag | Notes |
+|---|---|
+| `--purpose <text>` | Check only this purpose (matched like the `plan` input). Default: every purpose offered. |
+| `--type internal\|external` | Check only this type. Default: both. |
+
+Only these and the common flags are accepted. A narrower run leaves some slots unchecked, so `field_ids` and `validators` come back `null` (exit 2): only a full run can pass.
 
 ### Common
 
@@ -113,6 +124,19 @@ All optional. A value not given is defaulted and listed in `defaulted`. A defaul
 ### `status`
 
 `{ ok, requests: [{ caseId, name, status, active, createdOn, id }] }`. With `--case`, also `found` (`false` means exit 2).
+
+### `verify`
+
+`{ ok, checks: [{ id, pass, evidence, detail }], portal: { url, live, pages }, selections: { purposes, types }, scenarios, ms }`. It fills the form once per purpose and type, with defaults on, exactly as `plan` would, but never saves a plan and never submits. `ok` (exit 0) only when all six checks ran and passed. `pass: false` means the assumption is refuted; `pass: null` means the check could not run, and its `detail` says why. Both give exit 2. `portal.live` is `false` when `MCAPS_PORTAL_URL` points elsewhere: such a pass proves nothing about the live portal. `scenarios` lists each purpose × type run with its `status`, `checked` and `missing` slots and the `errors`/`blockers` codes. Identities in the evidence are masked to their first 2 characters.
+
+| Check `id` | Assumption | `evidence` |
+|---|---|---|
+| `portal_user` | A1: the form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`), and the owner default binds to it. | `present`, `used`, masked `email`/`userName`, `owner: { bound, reached, defaulted, upn, guid }` |
+| `allowance_labels` | A2: every Monthly Allowance label parses to an amount and the highest amount is unique. | Per scenario: `labels`, `amounts`, `max`, `maxCount`, `chosen`, `selected`, `defaulted` |
+| `field_ids` | A3: each slot's control has the expected id and its canonical label. | Per slot: `expectedId`, `id`, `label`, `canonical`, `tier`, `pass` (on failure also `problems`); `unchecked` slots |
+| `validators` | A4: an enabled required-field validator names each slot's canonical label and points at its expected id. | Per slot: `messages`, `controls`, `enabled`, `proof` (`validatorProof` for the expected id), `pass`; `unchecked` slots |
+| `timezone_default` | A5: the default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one option. | Per scenario: `zone`, `source`, `os`, `matched`, `candidates`, `offset`, `offsetAgrees`, `selected`, `defaulted` |
+| `writes_blocked` | A6: while filling, no portal POST, PUT, PATCH or DELETE got through except sign-in. | `blocked` and `allowed` counts by method (`allowed` also by reason), `portalAllowedOutsideSignIn`, `submitsSent`, `everArmed`, `witness` (the browser's own network view: `observed`, `responded`, `blockedByClient`, `uncorrelated`), `violations` |
 
 ## Codes
 
@@ -224,8 +248,8 @@ A request was created only when `outcome` is `success` and `caseId` is present, 
 
 | Code | Meaning |
 |---|---|
-| `0` | The command worked: a ready plan, `options` output, `submit` `success`, `status` output, `--help`. Not proof that a request exists. |
-| `2` | Needs action or nothing was created: `needs_input`, `invalid`, `blocked`, `not_submitted`, `rejected`, `status --case` not found. |
+| `0` | The command worked: a ready plan, `options` output, `submit` `success`, `status` output, `verify` with every check passing, `--help`. Not proof that a request exists. |
+| `2` | Needs action or nothing was created: `needs_input`, `invalid`, `blocked`, `not_submitted`, `rejected`, `status --case` not found, a `verify` check that failed or could not run. |
 | `3` | `submit` outcome `unknown`. |
 | `1` | Error (`ok: false`), or no command given. |
 

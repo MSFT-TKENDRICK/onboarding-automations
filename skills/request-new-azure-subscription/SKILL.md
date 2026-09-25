@@ -1,7 +1,7 @@
 ---
 name: request-new-azure-subscription
 description: "Request a new Azure subscription (internal, MCAPS or ESLabs) through the MCAPS Services portal and return its support case ID, or check the status of such a request. Use when a Microsoft employee asks to get, create, request or order an Azure subscription, sandbox, lab or demo subscription, or asks what happened to a subscription request (REQ-...). Not for managing existing subscriptions."
-allowed-tools: Read Bash(node *mcaps-subscription.mjs plan) Bash(node *mcaps-subscription.mjs plan *) Bash(node *mcaps-subscription.mjs options *) Bash(node *mcaps-subscription.mjs status*)
+allowed-tools: Read Bash(node *mcaps-subscription.mjs plan) Bash(node *mcaps-subscription.mjs plan *) Bash(node *mcaps-subscription.mjs options *) Bash(node *mcaps-subscription.mjs status*) Bash(node *mcaps-subscription.mjs verify*)
 compatibility: "Node.js >= 22, Microsoft Edge or Google Chrome, corporate network or VPN, a Microsoft corporate account (Windows or macOS SSO)."
 metadata:
   audience: microsoft-employees
@@ -119,3 +119,7 @@ If any entry below says stop, stop after reporting all entries.
 | `guard_unavailable`, `form_lost`, `navigation_failed`, `portal_timeout`, `browser_unresponsive`, `cdp_timeout`, `api_failed`, `contact_unknown`, `error` | Transient. Re-run the same command once (for `submit`, show the terms again and get acceptance first; the journal refuses anything already sent). If it repeats, report and stop. |
 
 `status --case <id>` returns `found: false` when the case is not visible yet: say so and check again later. Never resubmit because of it.
+
+| Maintainer command | When |
+|---|---|
+| `verify` | Before first use, or after `field_drift`/`form_drift`: proves the live-portal assumptions read-only (exit 0 only if every check passes). Report its JSON to the skill maintainers. Never a substitute for `plan`. See [references/PORTAL.md](references/PORTAL.md#proving-the-live-assumptions). |
