@@ -7,7 +7,7 @@ import { validatorProof } from './drift.mjs';
 
 export const normLabel = (s) => String(s ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '').toLowerCase();
 const real = (f) => (f.options ?? []).filter((o) => o.value !== '' && o.value != null);
-const AMOUNT = /^(?:usd|eur|gbp|[$€£])?\s*\d{1,3}(?:,?\d{3})*(?:\.\d+)?\s*(?:usd|eur|gbp)?\s*(?:\/\s*month|per month|monthly)?$/i;
+export const AMOUNT = /^(?:usd|eur|gbp|[$€£])?\s*\d{1,3}(?:,?\d{3})*(?:\.\d+)?\s*(?:usd|eur|gbp)?\s*(?:\/\s*month|per month|monthly)?$/i;
 
 // kind: 'choice' (select or radio group), 'text' (text input or textarea), 'lookup' (people-picker text input).
 // renamable/mappable false: never healed or remapped (owner: its hidden companions are id-bound).
