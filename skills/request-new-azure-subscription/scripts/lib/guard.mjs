@@ -1,5 +1,5 @@
 // Pure request classifier behind the CDP Fetch interceptor. Default-deny for writes.
-const READ = new Set(['GET', 'HEAD', 'OPTIONS']);
+export const READ = new Set(['GET', 'HEAD', 'OPTIONS']);
 const IDENTITY_HOSTS = ['login.microsoftonline.com', 'login.windows.net', 'login.live.com', 'device.login.microsoftonline.com', 'autologon.microsoftazuread-sso.com'];
 const AUTH_PATHS = [/^\/$/, /^\/_services\/auth\/token$/i, /^\/Account\/Login\/ExternalLogin/i, /^\/signin-/i];
 const BLOCKED_TYPES = new Set(['Image', 'Media', 'Font']);
@@ -39,16 +39,32 @@ export function parseFormBody(postData, contentType = 'application/x-www-form-ur
 // ASP.NET state fields and the anti-bot honeypot: present in every POST, never business data.
 export const isInfraName = (name) => /^(__|frm_pref_)/.test(String(name));
 
-export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockResources = true } = {}) {
+// allowSubmit false (verify): the submit gate can never be armed, so every form POST is denied.
+export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockResources = true, allowSubmit = true } = {}) {
   const form = new URL(formUrl);
   const blockedWrites = [];
+  // Every write decision, allowed or denied, with the phase it happened in (the ledger `verify` reports).
+  const writes = [];
   let gate = null;
+  let everArmed = false;
   let submitsSent = 0;
   let blockedResources = 0;
+  let phase = null;
 
   const isForm = (u) => u.origin === form.origin && u.pathname.toLowerCase() === form.pathname.toLowerCase() && u.searchParams.get('ServiceId') === form.searchParams.get('ServiceId');
 
-  function classify({ method, url, resourceType, postData, contentType, isMainFrame = true }) {
+  function classify(req) {
+    const v = decide(req);
+    const m = String(req.method || 'GET').toUpperCase();
+    if (!READ.has(m)) {
+      let u = null;
+      try { u = new URL(req.url); } catch {}
+      writes.push({ method: m, host: u?.hostname ?? '', path: u?.pathname ?? '', portal: u?.origin === form.origin, action: v.action, reason: v.reason, phase, ref: req.ref ?? null });
+    }
+    return v;
+  }
+
+  function decide({ method, url, resourceType, postData, contentType, isMainFrame = true }) {
     let u;
     try { u = new URL(url); } catch { return { action: 'continue', reason: 'unparsed' }; }
     if (u.protocol !== 'http:' && u.protocol !== 'https:') return { action: 'continue', reason: 'scheme' };
@@ -59,7 +75,7 @@ export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockRe
     }
     const deny = (reason, extra = {}) => { blockedWrites.push({ method: m, host: u.hostname, path: u.pathname, reason, ...extra }); return { action: 'fail', reason }; };
     if (u.origin === form.origin) {
-      if (gate && isForm(u) && resourceType === 'Document' && isMainFrame) {
+      if (allowSubmit && gate && isForm(u) && resourceType === 'Document' && isMainFrame) {
         if (gate.mustContain.length || gate.mustEqual.length || gate.onlyNames) {
           if (typeof postData !== 'string') return deny('submit-body-unverified');
           const params = parseFormBody(postData, contentType);
@@ -89,9 +105,15 @@ export function createGuard({ formUrl, allowWriteHosts = IDENTITY_HOSTS, blockRe
   return {
     classify,
     // onlyNames: the names the form serialized at arm time; any other non-infrastructure name is refused.
-    armSubmit({ mustContain = [], mustEqual = [], onlyNames = null } = {}) { gate = { mustContain, mustEqual, onlyNames: onlyNames ? new Set(onlyNames) : null }; },
+    armSubmit({ mustContain = [], mustEqual = [], onlyNames = null } = {}) {
+      if (!allowSubmit) throw new Error('Submitting is disabled for this session.');
+      gate = { mustContain, mustEqual, onlyNames: onlyNames ? new Set(onlyNames) : null };
+      everArmed = true;
+    },
     disarm() { gate = null; },
     get armed() { return !!gate; },
-    stats: () => ({ submitsSent, blockedResources, blockedWrites: blockedWrites.slice() }),
+    setPhase(p) { phase = p; },
+    get phase() { return phase; },
+    stats: () => ({ submitsSent, blockedResources, blockedWrites: blockedWrites.slice(), writes: writes.map((w) => ({ ...w })), everArmed }),
   };
 }

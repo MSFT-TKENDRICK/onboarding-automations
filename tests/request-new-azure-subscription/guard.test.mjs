@@ -200,3 +200,36 @@ test('a multipart file part with a filename or content never matches an expected
   assert.equal(guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp('; filename=""\r\nContent-Type: application/octet-stream', 'data') }).reason, 'submit-body-mismatch');
   assert.equal(guard.classify({ ...req('POST', FORM, 'Document'), contentType, postData: mp('; filename=""\r\nContent-Type: application/octet-stream', '') }).reason, 'submit');
 });
+
+test('allowSubmit false: the gate can never be armed and the form POST stays blocked', () => {
+  const guard = createGuard({ formUrl: FORM, allowSubmit: false });
+  assert.throws(() => guard.armSubmit(), /disabled/);
+  assert.equal(guard.armed, false);
+  const r = guard.classify(req('POST', FORM, 'Document'));
+  assert.equal(r.action, 'fail');
+  assert.equal(guard.stats().submitsSent, 0);
+  assert.equal(guard.stats().everArmed, false);
+});
+
+test('every write decision is recorded with its phase, allowed or blocked; reads are not', () => {
+  const guard = g();
+  guard.setPhase('load');
+  guard.classify({ ...req('POST', 'https://portal.example.com/Account/Login/ExternalLogin?x=1', 'Document'), ref: 's|1' });
+  guard.setPhase('fill');
+  guard.classify(req('GET', 'https://portal.example.com/_api/contacts'));
+  guard.classify({ ...req('PATCH', 'https://portal.example.com/_api/contacts(1)'), ref: 's|2' });
+  guard.classify(req('POST', 'https://login.microsoftonline.com/common/GetCredentialType'));
+  assert.equal(guard.phase, 'fill');
+  assert.deepEqual(guard.stats().writes, [
+    { method: 'POST', host: 'portal.example.com', path: '/Account/Login/ExternalLogin', portal: true, action: 'continue', reason: 'auth', phase: 'load', ref: 's|1' },
+    { method: 'PATCH', host: 'portal.example.com', path: '/_api/contacts(1)', portal: true, action: 'fail', reason: 'blocked-write', phase: 'fill', ref: 's|2' },
+    { method: 'POST', host: 'login.microsoftonline.com', path: '/common/GetCredentialType', portal: false, action: 'continue', reason: 'identity', phase: 'fill', ref: null },
+  ]);
+});
+
+test('everArmed stays true after disarm', () => {
+  const guard = g();
+  guard.armSubmit();
+  guard.disarm();
+  assert.equal(guard.stats().everArmed, true);
+});
