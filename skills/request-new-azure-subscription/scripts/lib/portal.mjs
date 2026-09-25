@@ -432,7 +432,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
       validators ??= await call(P.validatorIndex);
       r = resolveSlot(key, SLOT_ID[key], Object.values(fields), { ...opts, validators });
     }
-    bindings[key] = r.ok ? { tier: r.via, id: r.id } : { tier: r.code, id: r.id ?? null };
+    bindings[key] = r.ok ? { ok: true, tier: r.via, id: r.id } : { ok: false, tier: r.code, id: r.id ?? null };
     if (r.ok) {
       fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field), ...(r.via === 'validator' ? { proof: sha256(stableStringify({ id: r.id, message: r.evidence.message })) } : {}) };
       claimed.add(r.id);

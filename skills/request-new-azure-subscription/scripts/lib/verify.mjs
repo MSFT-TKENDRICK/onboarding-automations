@@ -3,6 +3,9 @@
 import { SLOTS, CANON, AMOUNT, normLabel } from './resolve.mjs';
 import { validatorLabel, validatorProof } from './drift.mjs';
 import { matchOption } from './match.mjs';
+import { systemTimeZone } from './defaults.mjs';
+import { openForm, fill, normalizeInput, SLOT_ID, APPLIES, DEFAULT_FORM_URL, SkillError } from './portal.mjs';
+import * as P from './page.mjs';
 
 export const CHECK_IDS = ['portal_user', 'allowance_labels', 'field_ids', 'validators', 'timezone_default', 'writes_blocked'];
 
@@ -210,4 +213,103 @@ export function checkWrites({ fillReached, submitsSent = 0, everArmed = false, d
 
 export function verdict(checks) {
   return CHECK_IDS.every((id) => checks.filter((c) => c.id === id).length === 1) && checks.length === CHECK_IDS.length && checks.every((c) => c.pass === true);
+}
+
+// ---------------------------------------------------------------- orchestration (browser)
+const COMMON = ['title', 'purpose', 'type', 'owner'];
+const TYPES = ['internal', 'external'];
+const GUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const byId = (fields) => Object.fromEntries(fields.map((f) => [f.id, f]));
+
+// The live portal, exactly: the built-in form URL, and every page the run evaluated on its origin, path and ServiceId.
+export function isLivePortal(formUrl, pages) {
+  const want = new URL(DEFAULT_FORM_URL);
+  const same = (u) => { try { const x = new URL(u); return x.origin === want.origin && x.pathname.toLowerCase() === want.pathname.toLowerCase() && x.searchParams.get('ServiceId') === want.searchParams.get('ServiceId'); } catch { return false; } };
+  return formUrl === DEFAULT_FORM_URL && pages.length > 0 && pages.every(same);
+}
+
+// One read-only pass over every offered purpose x type (or the --purpose/--type subset): fill with defaults on and
+// every write blocked, then read the page's own evidence. Never saves a plan, never arms or sends a submit.
+export async function runVerify(s, { purpose, type, env = process.env } = {}) {
+  const t0 = performance.now();
+  s.hooks.onSubmit = () => { throw new Error('verify never submits'); };
+  const zone = systemTimeZone(env);
+  const source = env.MCAPS_TIMEZONE ? 'MCAPS_TIMEZONE' : 'os';
+  const os = Intl.DateTimeFormat().resolvedOptions().timeZone ?? null;
+  const call = (fn, ...a) => s.page.call(fn, ...a);
+
+  s.guard.setPhase('load');
+  await openForm(s);
+  const st = await s.state();
+  const purposeField = (await call(P.snapshotFields)).find((f) => f.id === (st?.purposeId ?? SLOT_ID.purpose));
+  const offered = real(purposeField?.options);
+  let purposes = offered;
+  if (purpose !== undefined) {
+    const m = matchOption(offered, purpose);
+    if (!m.ok) throw new SkillError('bad_args', `--purpose "${purpose}" matches ${m.error === 'ambiguous' ? 'several' : 'no'} offered purpose. Offered: ${offered.map((o) => o.label).join(' | ')}`);
+    purposes = [{ value: m.value, label: m.label }];
+  }
+  const types = type ? [type] : TYPES;
+
+  const records = [];
+  const summaries = [];
+  const pages = [];
+  let fillReached = false;
+  let fresh = true;
+  for (const p of purposes) {
+    for (const t of types) {
+      if (!fresh) { s.guard.setPhase('load'); await openForm(s); }
+      fresh = false;
+      const user = await call(P.portalUser);
+      s.guard.setPhase('fill');
+      fillReached = true;
+      const r = await fill(s, normalizeInput({ purpose: p.value, type: t }), { defaults: true, discover: false, timeZone: zone, systemOne: null });
+      const snap = byId(await call(P.snapshotFields));
+      const validators = await call(P.validatorIndex);
+      const pageUrl = (await s.state())?.url ?? null;
+      if (pageUrl) pages.push(pageUrl);
+      const b = r.bindings ?? {};
+      const typeShown = !!r.resolved.type && new RegExp(t, 'i').test(r.resolved.type.label ?? '');
+      const applies = [...COMMON, ...(typeShown ? APPLIES[t] : [])].filter((k) => b[k]);
+      const boundId = (k) => (b[k]?.ok ? b[k].id : null);
+      const ev = await call(P.controlEvidence, applies.map((k) => boundId(k) ?? SLOT_ID[k]));
+      const slots = Object.fromEntries(applies.map((k) => {
+        const id = boundId(k);
+        const e = ev[id ?? SLOT_ID[k]] ?? {};
+        return [k, { expectedId: SLOT_ID[k], id, label: e.label ?? snap[id ?? SLOT_ID[k]]?.label ?? null, tier: b[k].tier, count: e.count ?? 0, associated: !!e.associated }];
+      }));
+      const defaulted = (k) => r.defaulted.some((d) => d.field === k);
+      const choice = (k) => {
+        if (!applies.includes(k)) return null;
+        const id = boundId(k) ?? (snap[SLOT_ID[k]] ? SLOT_ID[k] : null);
+        return id ? { id, options: snap[id]?.options ?? [], selected: snap[id]?.value ?? null, defaulted: defaulted(k) } : null;
+      };
+      const tz = choice('timezone');
+      const name = `${p.label}/${t}`;
+      records.push({
+        name, type: t, pageUrl, applies, slots, validators,
+        user: { present: !!(user.email || user.userName), email: user.email, userName: user.userName },
+        owner: { reached: !!b.owner, defaulted: defaulted('owner'), upn: r.resolved.owner?.upn ?? null, guid: GUID.test(r.derived?.ownerGuid ?? '') },
+        allowance: choice('allowance'),
+        timezone: tz && { ...tz, zone, source, os },
+      });
+      const codes = (list) => (list ?? []).map((x) => x.code ?? x.field);
+      summaries.push({ name, status: r.status, typeShown, checked: applies, missing: codes(r.missing), errors: codes(r.errors), blockers: codes(r.blockers) });
+      s.log(`verify ${name}: ${r.status}`);
+    }
+  }
+
+  const g = s.guard.stats();
+  const checks = [
+    checkPortalUser(records), checkAllowance(records), checkFieldIds(records), checkValidators(records), checkTimezone(records),
+    checkWrites({ fillReached, submitsSent: g.submitsSent + s.submitEvents.length, everArmed: g.everArmed, decisions: g.writes, witness: s.witness() }),
+  ];
+  const uniquePages = [...new Set(pages)];
+  return {
+    ok: verdict(checks), checks,
+    portal: { url: s.formUrl, live: isLivePortal(s.formUrl, uniquePages), pages: uniquePages },
+    selections: { purposes: purposes.map((o) => o.label), types },
+    scenarios: summaries,
+    ms: Math.round(performance.now() - t0),
+  };
 }
