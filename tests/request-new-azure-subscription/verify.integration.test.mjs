@@ -80,6 +80,16 @@ describe('verify against the mock portal', { skip, concurrency: 2, timeout: 6000
     assert.match(r.out.next, /null/);
   }));
 
+  it('--purpose alone still cannot pass: other purposes were never exercised', () => withMock({}, async ({ verify }) => {
+    const r = await verify('--purpose', 'Hybrid');
+    const c = byId(r.out);
+    assert.equal(r.code, 2, JSON.stringify(r.out.checks.map((x) => [x.id, x.pass])));
+    assert.deepEqual(r.out.selections.types, ['internal', 'external']);
+    assert.equal(c.field_ids.pass, null);
+    assert.equal(c.validators.pass, null);
+    assert.match(c.field_ids.detail, /--purpose/);
+  }));
+
   it('A1: no Portal.User fails portal_user; userName alone passes', () => withMock({ portalUser: null }, async ({ verify }) => {
     const c = byId((await verify(...SCOPED)).out).portal_user;
     assert.equal(c.pass, false, c.detail);

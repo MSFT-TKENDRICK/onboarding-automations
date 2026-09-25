@@ -94,7 +94,9 @@ node scripts/mcaps-subscription.mjs verify --pretty
 
 Add `--headed` if it returns `auth_required`. Connect the VPN first (`vpn_required`). The session cannot arm or send a
 submit, every portal write except sign-in is blocked, and nothing is saved. It fills the form once per purpose × type
-with defaults on, then reads the page's own evidence. Exit 0 only if all six checks pass. Any `false` (refuted) or `null`
+with defaults on, then reads the page's own evidence. Every scenario must cover every slot it should: one that stops
+early makes the affected checks `null`, never a pass. A type the purpose does not offer is recorded (`typeOffered`).
+Exit 0 only if all six checks pass. Any `false` (refuted) or `null`
 (could not run; see `detail`) gives exit 2: send the whole JSON to the skill maintainers. A pass with
 `portal.live: false` came from `MCAPS_PORTAL_URL` and proves nothing about the live portal.
 
@@ -104,7 +106,7 @@ with defaults on, then reads the page's own evidence. Exit 0 only if all six che
 | A2 | Every Monthly Allowance label parses to an amount and the highest amount is unique; the default selects it. | `allowance_labels` |
 | A3 | Every slot's control has its expected id, exactly once, with its canonical label associated. A label-tolerant or remapped binding fails. | `field_ids` |
 | A4 | An enabled `Page_Validators` entry names each required slot's canonical label with `controltovalidate` on its expected id, and `validatorProof` agrees. | `validators` |
-| A5 | The default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one Time Zone option, with an agreeing UTC offset. | `timezone_default` |
+| A5 | The default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one Time Zone option and the page selects it. When the option's label shows a UTC offset, it must agree (`offsetAgrees`; `null` when the label has none). | `timezone_default` |
 | A6 | While filling, no POST, PUT, PATCH or DELETE reaches the portal except sign-in during load, confirmed by both the guard's decisions and the browser's own network events. | `writes_blocked` |
 
 Evidence per check is under `verify` in [CLI.md Output](CLI.md#output). Identities are masked to their first 2 characters. Identities are masked to their first 2 characters.

@@ -1,7 +1,7 @@
 // Pure checks behind `verify` (no browser). Each check must fail closed: a skipped scenario is null, never a pass.
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { CHECK_IDS, maskIdentity, labelAmount, standardOffset, checkPortalUser, checkAllowance, checkFieldIds, checkValidators, checkTimezone, checkWrites, verdict } from '../../skills/request-new-azure-subscription/scripts/lib/verify.mjs';
+import { CHECK_IDS, maskIdentity, labelAmount, standardOffset, checkPortalUser, checkAllowance, checkFieldIds, checkValidators, checkTimezone, checkWrites, verdict, narrowToScope } from '../../skills/request-new-azure-subscription/scripts/lib/verify.mjs';
 
 const FORM = 'https://portal.example.com/support/eslabs-newazuresubscription/?ServiceId=abc';
 const CANON = { title: 'Title', purpose: 'Subscription Purpose', type: 'Subscription Type', owner: 'Subscription Owner', allowance: 'Monthly Allowance', timezone: 'Time Zone', tenantType: 'Tenant Type', tenantLicensing: 'Tenant Licensing', tenantName: 'Tenant Display Name' };
@@ -220,6 +220,12 @@ describe('timezone_default (A5)', () => {
     assert.equal(checkTimezone(tz({ options: [{ value: 'x', label: '(UTC+01:00) Pacific Time (US & Canada)' }], selected: 'x', defaulted: true })).pass, false);
   });
 
+  it('a label without an offset is judged by the unique match alone, and says so (offsetAgrees: null)', () => {
+    const c = checkTimezone([scen('internal', { timezone: { id: ID.timezone, options: [{ value: '', label: 'Select' }, { value: 'c', label: 'Central Time (US & Canada)' }], selected: 'c', defaulted: true, zone: 'Central Time (US & Canada)', source: 'MCAPS_TIMEZONE' } })]);
+    assert.equal(c.pass, true, c.detail);
+    assert.equal(c.evidence.scenarios[0].offsetAgrees, null);
+  });
+
   it('is null without a zone or without a scenario that shows the field', () => {
     assert.equal(checkTimezone([scen('external')]).pass, null);
     assert.equal(checkTimezone([scen('internal', { timezone: { id: ID.timezone, options: ZONES, selected: '', defaulted: false, zone: null, source: 'os' } })]).pass, null);
@@ -279,5 +285,55 @@ describe('verdict', () => {
     assert.equal(verdict([...all(true), { id: 'portal_user', pass: true }]), false, 'a duplicate');
     assert.equal(verdict(all(true).map((c, i) => (i === 2 ? { ...c, pass: null } : c))), false, 'null is not a pass');
     assert.equal(verdict(all(true).map((c, i) => (i === 2 ? { ...c, pass: 'yes' } : c))), false, 'truthy is not a pass');
+  });
+});
+
+describe('coverage: no scenario may drop out silently (review findings)', () => {
+  it('portal_user fails when any scenario lacks Portal.User or bound someone else, even if another bound correctly', () => {
+    const absent = scen('external', { user: { present: false, email: null, userName: null }, owner: { reached: true, defaulted: false, upn: null, guid: false } });
+    const c = checkPortalUser([scen('internal'), absent]);
+    assert.equal(c.pass, false, c.detail);
+    assert.match(c.detail, /Hybrid\/external/);
+    const other = scen('external', { owner: { reached: true, defaulted: true, upn: 'bob@contoso.com', guid: true } });
+    assert.equal(checkPortalUser([scen('internal'), other]).pass, false);
+  });
+
+  it('portal_user is null when a scenario expected to reach the owner never did', () => {
+    const stopped = scen('external', { expected: [...COMMON, ...DEP.external], applies: ['purpose'], owner: { reached: false } });
+    const c = checkPortalUser([scen('internal'), stopped]);
+    assert.equal(c.pass, null, c.detail);
+    assert.match(c.detail, /Hybrid\/external/);
+  });
+
+  it('field_ids and validators are null when an expected slot of some scenario was never bound', () => {
+    const stopped = scen('external', { expected: [...COMMON, ...DEP.external], applies: ['title', 'purpose', 'type', 'owner'] });
+    const other = { ...scen('external'), name: 'Other/external' };
+    for (const fn of [checkFieldIds, checkValidators]) {
+      const c = fn([scen('internal'), other, stopped]);
+      assert.equal(c.pass, null, `${c.id}: ${c.detail}`);
+      assert.deepEqual(c.evidence.slots.tenantName.unverifiedIn, ['Hybrid/external']);
+      assert.match(c.detail, /tenantName/);
+    }
+  });
+
+  it('allowance_labels and timezone_default are null when a scenario expected to show them did not', () => {
+    const lost = { ...scen('internal', { expected: [...COMMON, ...DEP.internal], applies: COMMON, allowance: null, timezone: null }), name: 'Other/internal' };
+    for (const fn of [checkAllowance, checkTimezone]) {
+      const c = fn([scen('internal'), lost]);
+      assert.equal(c.pass, null, `${c.id}: ${c.detail}`);
+      assert.ok(c.evidence.scenarios.some((r) => r.scenario === 'Other/internal' && r.pass === null), JSON.stringify(c.evidence.scenarios));
+    }
+  });
+
+  it('a scoped run can never pass field_ids or validators, even when every slot was covered', () => {
+    const checks = CHECK_IDS.map((id) => ({ id, pass: true, evidence: {}, detail: 'ok' }));
+    const out = narrowToScope(checks, { purpose: 'Hybrid' });
+    assert.equal(out.find((c) => c.id === 'field_ids').pass, null);
+    assert.equal(out.find((c) => c.id === 'validators').pass, null);
+    assert.match(out.find((c) => c.id === 'field_ids').detail, /--purpose/);
+    assert.equal(verdict(out), false);
+    assert.deepEqual(narrowToScope(checks, {}), checks, 'a full run is untouched');
+    const failed = checks.map((c) => (c.id === 'validators' ? { ...c, pass: false } : c));
+    assert.equal(narrowToScope(failed, { type: 'internal' }).find((c) => c.id === 'validators').pass, false, 'a refutation stays a refutation');
   });
 });

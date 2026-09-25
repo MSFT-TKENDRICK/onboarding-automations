@@ -66,7 +66,7 @@ All optional. A value not given is defaulted and listed in `defaulted`. A defaul
 | `--purpose <text>` | Check only this purpose (matched like the `plan` input). Default: every purpose offered. |
 | `--type internal\|external` | Check only this type. Default: both. |
 
-Only these and the common flags are accepted. A narrower run leaves some slots unchecked, so `field_ids` and `validators` come back `null` (exit 2): only a full run can pass.
+Only these and the common flags are accepted. Any `--purpose` or `--type` run exercises only part of the form, so `field_ids` and `validators` can fail there but never pass (they come back `null`, exit 2): only a full run can pass.
 
 ### Common
 
@@ -127,15 +127,15 @@ Only these and the common flags are accepted. A narrower run leaves some slots u
 
 ### `verify`
 
-`{ ok, checks: [{ id, pass, evidence, detail }], portal: { url, live, pages }, selections: { purposes, types }, scenarios, ms }`. It fills the form once per purpose and type, with defaults on, exactly as `plan` would, but never saves a plan and never submits. `ok` (exit 0) only when all six checks ran and passed. `pass: false` means the assumption is refuted; `pass: null` means the check could not run, and its `detail` says why. Both give exit 2. `portal.live` is `false` when `MCAPS_PORTAL_URL` points elsewhere: such a pass proves nothing about the live portal. `scenarios` lists each purpose × type run with its `status`, `checked` and `missing` slots and the `errors`/`blockers` codes. Identities in the evidence are masked to their first 2 characters.
+`{ ok, checks: [{ id, pass, evidence, detail }], portal: { url, live, pages }, selections: { purposes, types }, scenarios, ms }`. It fills the form once per purpose and type, with defaults on, exactly as `plan` would, but never saves a plan and never submits. `ok` (exit 0) only when all six checks ran and passed. `pass: false` means the assumption is refuted; `pass: null` means the check could not run, and its `detail` says why. Both give exit 2. `portal.live` is `false` when `MCAPS_PORTAL_URL` points elsewhere: such a pass proves nothing about the live portal. `scenarios` lists each purpose × type run with its `status`, `typeOffered`, `expected` and `checked` slots, `missing`, and the `errors`/`blockers` codes. A scenario that did not cover an `expected` slot makes the checks that depend on it `null`. Identities in the evidence are masked to their first 2 characters.
 
 | Check `id` | Assumption | `evidence` |
 |---|---|---|
-| `portal_user` | A1: the form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`), and the owner default binds to it. | `present`, `used`, masked `email`/`userName`, `owner: { bound, reached, defaulted, upn, guid }` |
+| `portal_user` | A1: the form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`), and the owner default binds to it in every scenario. | `present`, `used`, masked `email`/`userName`, `owner: { bound, reached, defaulted, upn, guid }`, per-scenario `scenarios` |
 | `allowance_labels` | A2: every Monthly Allowance label parses to an amount and the highest amount is unique. | Per scenario: `labels`, `amounts`, `max`, `maxCount`, `chosen`, `selected`, `defaulted` |
-| `field_ids` | A3: each slot's control has the expected id and its canonical label. | Per slot: `expectedId`, `id`, `label`, `canonical`, `tier`, `pass` (on failure also `problems`); `unchecked` slots |
-| `validators` | A4: an enabled required-field validator names each slot's canonical label and points at its expected id. | Per slot: `messages`, `controls`, `enabled`, `proof` (`validatorProof` for the expected id), `pass`; `unchecked` slots |
-| `timezone_default` | A5: the default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one option. | Per scenario: `zone`, `source`, `os`, `matched`, `candidates`, `offset`, `offsetAgrees`, `selected`, `defaulted` |
+| `field_ids` | A3: each slot's control has the expected id and its canonical label. | Per slot: `expectedId`, `id`, `label`, `canonical`, `tier`, `pass` (on failure also `problems`; `unverifiedIn` for scenarios that never bound it); `unchecked` slots |
+| `validators` | A4: an enabled required-field validator names each slot's canonical label and points at its expected id. | Per slot: `messages`, `controls`, `enabled`, `proof` (`validatorProof` for the expected id), `pass`, `unverifiedIn`; `unchecked` slots |
+| `timezone_default` | A5: the default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one option; a UTC offset shown in its label must agree. | Per scenario: `zone`, `source`, `os`, `matched`, `candidates`, `offset`, `offsetAgrees`, `selected`, `defaulted` |
 | `writes_blocked` | A6: while filling, no portal POST, PUT, PATCH or DELETE got through except sign-in. | `blocked` and `allowed` counts by method (`allowed` also by reason), `portalAllowedOutsideSignIn`, `submitsSent`, `everArmed`, `witness` (the browser's own network view: `observed`, `responded`, `blockedByClient`, `uncorrelated`), `violations` |
 
 ## Codes

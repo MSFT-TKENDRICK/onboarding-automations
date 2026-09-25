@@ -53,29 +53,46 @@ const labelOffset = (label) => {
   return m ? (m[1] ?? '+00:00') : null;
 };
 
-// A1: Portal.User exposes the signed-in user, and the owner default bound exactly that user on the page.
+// A1: Portal.User exposes the signed-in user, and in every scenario that reached the owner step the owner default
+// bound exactly that user. A scenario that was expected to reach it and did not leaves the check unproven (null).
 export function checkPortalUser(scenarios) {
-  const u = scenarios.find((s) => s.user?.present)?.user ?? scenarios.find((s) => s.user)?.user ?? { present: false };
-  const identity = u.email || u.userName || null;
+  const idOf = (u) => u?.email || u?.userName || null;
+  const rows = [];
+  for (const s of scenarios) {
+    const u = s.user ?? { present: false };
+    const identity = idOf(u);
+    const o = s.owner ?? {};
+    const base = { scenario: s.name, present: !!identity, reached: !!o.reached };
+    if (!identity) { rows.push({ ...base, s, bound: false, pass: false, why: 'no identity' }); continue; }
+    if (!o.reached) { if (expects(s, 'owner')) rows.push({ ...base, s, bound: false, pass: null, why: 'not reached' }); continue; }
+    const bound = !!o.defaulted && String(o.upn ?? '').toLowerCase() === identity.toLowerCase() && !!o.guid;
+    rows.push({ ...base, s, bound, pass: bound, why: bound ? null : 'not bound' });
+  }
+  const shownRow = rows.find((r) => r.pass === false) ?? rows.find((r) => r.pass === null) ?? rows[0];
+  const u = shownRow?.s.user ?? scenarios[0]?.user ?? { present: false };
+  const identity = idOf(u);
   const used = u.email ? 'email' : u.userName ? 'userName' : null;
-  const reached = scenarios.filter((s) => s.owner?.reached);
-  const bound = !!identity && reached.some((s) => s.owner.defaulted && String(s.owner.upn ?? '').toLowerCase() === identity.toLowerCase() && s.owner.guid);
-  const shown = reached.find((s) => s.owner.defaulted)?.owner ?? reached[0]?.owner;
+  const reached = rows.filter((r) => r.reached);
+  const shown = (shownRow?.reached ? shownRow.s.owner : reached[0]?.s.owner) ?? null;
+  const pass = rows.length ? combine(rows.map((r) => r.pass)) : null;
   const evidence = {
     present: !!identity, email: maskIdentity(u.email ?? null), userName: maskIdentity(u.userName ?? null), used,
-    owner: { bound, reached: reached.length, defaulted: !!shown?.defaulted, upn: maskIdentity(shown?.upn ?? null), guid: !!shown?.guid },
+    owner: { bound: pass === true, reached: reached.length, defaulted: !!shown?.defaulted, upn: maskIdentity(shown?.upn ?? null), guid: !!shown?.guid },
+    scenarios: rows.map(({ scenario, present, reached: r, bound, pass: p }) => ({ scenario, present, reached: r, bound, pass: p })),
   };
-  if (!identity) return check('portal_user', false, evidence, 'Microsoft.Dynamic365.Portal.User exposes neither email nor userName, so the owner cannot default.');
-  if (!reached.length) return check('portal_user', null, evidence, 'The owner step never ran (an earlier field failed), so the owner default is unproven.');
-  return check('portal_user', bound, evidence, bound
-    ? `Portal.User.${used} is present and the owner default bound to it (a resolved GUID).`
-    : 'Portal.User is present but the owner default did not bind to that user with a resolved GUID.');
+  const names = (why) => rows.filter((r) => r.why === why).map((r) => r.scenario).join(', ');
+  if (pass === true) return check('portal_user', true, evidence, `Portal.User.${used} is present and the owner default bound to it (a resolved GUID) in every scenario.`);
+  if (pass === false) return check('portal_user', false, evidence, names('no identity')
+    ? `Microsoft.Dynamic365.Portal.User exposes neither email nor userName (in ${names('no identity')}), so the owner cannot default.`
+    : `Portal.User is present but the owner default did not bind to that user with a resolved GUID (in ${names('not bound')}).`);
+  return check('portal_user', null, evidence, `The owner step never ran${names('not reached') ? ` in ${names('not reached')}` : ''} (an earlier field failed), so the owner default is unproven.`);
 }
 
 // A2: every Monthly Allowance label parses to an amount, the highest is unique, and the page holds it by default.
 export function checkAllowance(scenarios) {
   const seen = scenarios.filter((s) => s.allowance);
-  if (!seen.length) return check('allowance_labels', null, { scenarios: [] }, 'No scenario showed Monthly Allowance.');
+  const lost = scenarios.filter((s) => !s.allowance && expects(s, 'allowance')).map((s) => ({ scenario: s.name, pass: null, detail: 'Monthly Allowance was expected but never read' }));
+  if (!seen.length && !lost.length) return check('allowance_labels', null, { scenarios: [] }, 'No scenario showed Monthly Allowance.');
   const rows = seen.map((s) => {
     const opts = real(s.allowance.options);
     const amounts = opts.map((o) => labelAmount(o.label));
@@ -88,16 +105,26 @@ export function checkAllowance(scenarios) {
     const pass = !!chosen && s.allowance.defaulted === true && String(s.allowance.selected) === String(chosen.value);
     return { scenario: s.name, labels: opts.map((o) => o.label), amounts, max, maxCount: top.length, chosen: chosen?.label ?? null, selected: s.allowance.selected ?? null, defaulted: !!s.allowance.defaulted, pass };
   });
-  const pass = rows.every((r) => r.pass);
-  const bad = rows.find((r) => !r.pass);
-  return check('allowance_labels', pass, { scenarios: rows }, pass ? 'Every allowance label parses and the unique maximum was selected by default.'
-    : bad.amounts.includes(null) ? `Unparsable allowance label(s): ${bad.labels.filter((_, i) => bad.amounts[i] == null).map((l) => JSON.stringify(l)).join(', ')}.`
-      : bad.maxCount !== 1 ? `The highest allowance (${bad.max}) is offered ${bad.maxCount} times.`
-        : 'The page did not hold the highest allowance after defaulting.');
+  const all = [...rows, ...lost];
+  const pass = combine(all.map((r) => r.pass));
+  const bad = rows.find((r) => r.pass === false);
+  return check('allowance_labels', pass, { scenarios: all }, pass === true ? 'Every allowance label parses and the unique maximum was selected by default.'
+    : pass === null ? `Monthly Allowance was never read in ${lost.map((r) => r.scenario).join(', ')}, so its labels there are unproven.`
+      : bad.amounts.includes(null) ? `Unparsable allowance label(s): ${bad.labels.filter((_, i) => bad.amounts[i] == null).map((l) => JSON.stringify(l)).join(', ')}.`
+        : bad.maxCount !== 1 ? `The highest allowance (${bad.max}) is offered ${bad.maxCount} times.`
+          : 'The page did not hold the highest allowance after defaulting.');
 }
 
 const allSlots = Object.keys(SLOTS);
-const checkedSlots = (scenarios) => allSlots.filter((k) => scenarios.some((s) => s.applies?.includes(k) && s.slots?.[k]));
+const expects = (s, k) => (s.expected ?? s.applies ?? []).includes(k);
+const covers = (s, k) => !!(s.applies?.includes(k) && s.slots?.[k]);
+const checkedSlots = (scenarios) => allSlots.filter((k) => scenarios.some((s) => covers(s, k)));
+const gapsFor = (scenarios, k) => scenarios.filter((s) => expects(s, k) && !covers(s, k)).map((s) => s.name);
+const slotPass = (failed, gaps) => (failed ? false : gaps.length ? null : true);
+const notProven = (slots, unchecked) => [
+  ...Object.entries(slots).filter(([, x]) => x.pass === null).map(([k, x]) => `${k} (never bound in ${x.unverifiedIn.join(', ')})`),
+  ...unchecked,
+].join(', ');
 
 // A3: each slot is bound by its expected id, the id is unique, and its associated label is the canonical one.
 export function checkFieldIds(scenarios) {
@@ -110,18 +137,20 @@ export function checkFieldIds(scenarios) {
     r.associated !== true && 'the label is not associated with the control',
   ].filter(Boolean);
   for (const k of checkedSlots(scenarios)) {
-    const recs = scenarios.filter((s) => s.applies.includes(k) && s.slots[k]).map((s) => ({ s, r: s.slots[k], p: problems(s.slots[k], k) }));
+    const recs = scenarios.filter((s) => covers(s, k)).map((s) => ({ s, r: s.slots[k], p: problems(s.slots[k], k) }));
     const shown = recs.find((x) => x.p.length) ?? recs[0];
     const { r } = shown;
-    slots[k] = { expectedId: r.expectedId, id: r.id ?? null, label: r.label ?? null, canonical: CANON[k], tier: r.tier, pass: !shown.p.length, scenarios: recs.map((x) => x.s.name) };
+    const gaps = gapsFor(scenarios, k);
+    slots[k] = { expectedId: r.expectedId, id: r.id ?? null, label: r.label ?? null, canonical: CANON[k], tier: r.tier, pass: slotPass(shown.p.length > 0, gaps), scenarios: recs.map((x) => x.s.name) };
+    if (gaps.length) slots[k].unverifiedIn = gaps;
     if (shown.p.length) Object.assign(slots[k], { count: r.count ?? 0, associated: !!r.associated, problems: shown.p, failedIn: shown.s.name });
   }
   const unchecked = allSlots.filter((k) => !slots[k]);
   const pass = combine([...Object.values(slots).map((x) => x.pass), ...unchecked.map(() => null)]);
-  const failed = Object.keys(slots).filter((k) => !slots[k].pass);
+  const failed = Object.keys(slots).filter((k) => slots[k].pass === false);
   return check('field_ids', pass, { slots, unchecked }, pass === true ? 'Every slot is at its expected id with its canonical label.'
     : pass === false ? `Drifted: ${failed.map((k) => `${k} (${slots[k].problems.join('; ')})`).join(', ')}.`
-      : `Not checked: ${unchecked.join(', ')} (no scenario showed them; run verify without --purpose/--type).`);
+      : `Not proven: ${notProven(slots, unchecked)} (no scenario showed them there; run verify without --purpose/--type).`);
 }
 
 // A4: the enabled Page_Validators name each slot's canonical label and point at its expected id, and the
@@ -129,7 +158,7 @@ export function checkFieldIds(scenarios) {
 export function checkValidators(scenarios) {
   const slots = {};
   for (const k of checkedSlots(scenarios)) {
-    const recs = scenarios.filter((s) => s.applies.includes(k) && s.slots[k]).map((s) => {
+    const recs = scenarios.filter((s) => covers(s, k)).map((s) => {
       const expectedId = s.slots[k].expectedId;
       const vals = s.validators ?? [];
       const naming = vals.filter((v) => validatorLabel(v.message, CANON[k], { anchored: true }));
@@ -140,15 +169,17 @@ export function checkValidators(scenarios) {
       return { s, expectedId, messages: naming.map((v) => v.message), controls: [...new Set(naming.map((v) => v.control))], enabled: own.length, proof, pass: independent && p.ok && p.id === expectedId };
     });
     const x = recs.find((r) => !r.pass) ?? recs[0];
-    slots[k] = { expectedId: x.expectedId, messages: x.messages, controls: x.controls, enabled: x.enabled, proof: x.proof, pass: x.pass, scenarios: recs.map((r) => r.s.name) };
+    const gaps = gapsFor(scenarios, k);
+    slots[k] = { expectedId: x.expectedId, messages: x.messages, controls: x.controls, enabled: x.enabled, proof: x.proof, pass: slotPass(!x.pass, gaps), scenarios: recs.map((r) => r.s.name) };
+    if (gaps.length) slots[k].unverifiedIn = gaps;
     if (!x.pass) slots[k].failedIn = x.s.name;
   }
   const unchecked = allSlots.filter((k) => !slots[k]);
   const pass = combine([...Object.values(slots).map((v) => v.pass), ...unchecked.map(() => null)]);
-  const failed = Object.keys(slots).filter((k) => !slots[k].pass);
+  const failed = Object.keys(slots).filter((k) => slots[k].pass === false);
   return check('validators', pass, { slots, unchecked }, pass === true ? 'Every slot has an enabled validator naming its label on its expected id.'
     : pass === false ? `No proof for: ${failed.map((k) => `${k} (${slots[k].proof.reason ?? (slots[k].enabled ? `points at ${slots[k].controls.join(', ')}` : 'no enabled validator')})`).join(', ')}.`
-      : `Not checked: ${unchecked.join(', ')}.`);
+      : `Not proven: ${notProven(slots, unchecked)}.`);
 }
 
 // A5: the default time zone matches exactly one option, the page holds it, and its UTC offset agrees.
@@ -166,11 +197,13 @@ export function checkTimezone(scenarios) {
     const pass = !!matched && t.defaulted === true && String(t.selected) === String(matched.value) && offsetAgrees !== false;
     return { ...base, matched, candidates: r.ok ? [r.label] : r.candidates ?? [], error: r.ok ? undefined : r.error, selected: t.selected ?? null, defaulted: !!t.defaulted, offset, offsetAgrees, pass };
   });
+  const lost = scenarios.filter((s) => !s.timezone && expects(s, 'timezone')).map((s) => ({ scenario: s.name, pass: null, detail: 'Time Zone was expected but never read' }));
+  rows.push(...lost);
   const pass = rows.length ? combine(rows.map((r) => r.pass)) : null;
   const bad = rows.find((r) => r.pass === false);
   return check('timezone_default', pass, { scenarios: rows }, !rows.length ? 'No scenario showed Time Zone.'
     : pass === true ? 'The default zone matched exactly one option and the page selected it.'
-      : pass === null ? 'No default time zone is known (set MCAPS_TIMEZONE or fix the OS zone).'
+      : pass === null ? (lost.length ? `Time Zone was never read in ${lost.map((r) => r.scenario).join(', ')}.` : 'No default time zone is known (set MCAPS_TIMEZONE or fix the OS zone).')
         : !bad.matched ? `${bad.zone} matched ${bad.candidates.length ? `${bad.candidates.length} options` : 'no option'} (${bad.error}).`
           : bad.offsetAgrees === false ? `${bad.zone} (${bad.offset}) matched ${JSON.stringify(bad.matched.label)}, whose offset disagrees.`
             : 'The page did not hold the matched zone after defaulting.');
@@ -213,6 +246,15 @@ export function checkWrites({ fillReached, submitsSent = 0, everArmed = false, d
 
 export function verdict(checks) {
   return CHECK_IDS.every((id) => checks.filter((c) => c.id === id).length === 1) && checks.length === CHECK_IDS.length && checks.every((c) => c.pass === true);
+}
+
+// A --purpose/--type run exercises only part of the form: field_ids and validators can refute there, never prove.
+export function narrowToScope(checks, { purpose, type } = {}) {
+  if (purpose === undefined && !type) return checks;
+  const scope = [purpose !== undefined && '--purpose', type && '--type'].filter(Boolean).join('/');
+  return checks.map((c) => (['field_ids', 'validators'].includes(c.id) && c.pass === true
+    ? { ...c, pass: null, detail: `Scoped run (${scope}): other purposes or types were not exercised, so this is unproven. ${c.detail}` }
+    : c));
 }
 
 // ---------------------------------------------------------------- orchestration (browser)
@@ -269,9 +311,13 @@ export async function runVerify(s, { purpose, type, env = process.env } = {}) {
       const pageUrl = (await s.state())?.url ?? null;
       if (pageUrl) pages.push(pageUrl);
       const b = r.bindings ?? {};
-      const typeShown = !!r.resolved.type && new RegExp(t, 'i').test(r.resolved.type.label ?? '');
-      const applies = [...COMMON, ...(typeShown ? APPLIES[t] : [])].filter((k) => b[k]);
       const boundId = (k) => (b[k]?.ok ? b[k].id : null);
+      const typeShown = !!r.resolved.type && new RegExp(t, 'i').test(r.resolved.type.label ?? '');
+      const typeField = snap[boundId('type') ?? SLOT_ID.type];
+      const typeOffered = real(typeField?.options).some((o) => new RegExp(t, 'i').test(o.label ?? ''));
+      const applies = [...COMMON, ...(typeShown ? APPLIES[t] : [])].filter((k) => b[k]);
+      // What this scenario had to cover: a type the purpose really does not offer is recorded, never a silent gap.
+      const expected = typeOffered ? [...COMMON, ...APPLIES[t]] : COMMON.filter((k) => k !== 'type' || b[k]);
       const ev = await call(P.controlEvidence, applies.map((k) => boundId(k) ?? SLOT_ID[k]));
       const slots = Object.fromEntries(applies.map((k) => {
         const id = boundId(k);
@@ -287,23 +333,23 @@ export async function runVerify(s, { purpose, type, env = process.env } = {}) {
       const tz = choice('timezone');
       const name = `${p.label}/${t}`;
       records.push({
-        name, type: t, pageUrl, applies, slots, validators,
+        name, type: t, pageUrl, expected, applies, slots, validators,
         user: { present: !!(user.email || user.userName), email: user.email, userName: user.userName },
         owner: { reached: !!b.owner, defaulted: defaulted('owner'), upn: r.resolved.owner?.upn ?? null, guid: GUID.test(r.derived?.ownerGuid ?? '') },
         allowance: choice('allowance'),
         timezone: tz && { ...tz, zone, source, os },
       });
       const codes = (list) => (list ?? []).map((x) => x.code ?? x.field);
-      summaries.push({ name, status: r.status, typeShown, checked: applies, missing: codes(r.missing), errors: codes(r.errors), blockers: codes(r.blockers) });
+      summaries.push({ name, status: r.status, typeOffered, typeShown, expected, checked: applies, missing: codes(r.missing), errors: codes(r.errors), blockers: codes(r.blockers) });
       s.log(`verify ${name}: ${r.status}`);
     }
   }
 
   const g = s.guard.stats();
-  const checks = [
+  const checks = narrowToScope([
     checkPortalUser(records), checkAllowance(records), checkFieldIds(records), checkValidators(records), checkTimezone(records),
     checkWrites({ fillReached, submitsSent: g.submitsSent + s.submitEvents.length, everArmed: g.everArmed, decisions: g.writes, witness: s.witness() }),
-  ];
+  ], { purpose, type });
   const uniquePages = [...new Set(pages)];
   return {
     ok: verdict(checks), checks,
