@@ -1,7 +1,7 @@
 // Portal driver: guarded CDP session + plan / submit / status flows.
 import { pageSession } from './cdp.mjs';
 import { launchBrowser } from './browser.mjs';
-import { createGuard, isInfraName } from './guard.mjs';
+import { createGuard, isInfraName, READ } from './guard.mjs';
 import { resolveSlot, fingerprint, isChoiceField, validateMap, CANON } from './resolve.mjs';
 import { matchOption, matchOwner, ownerSearchTerm, normalize } from './match.mjs';
 import { redactor } from './systemone.mjs';
@@ -30,12 +30,12 @@ const AUTO_FIELDS = new Set([F.requester, F.manager, F.owner]);
 const KNOWN = new Set([F.title, F.purpose, F.type, F.owner, ...DEPENDENT.map((d) => d[1]), F.requester, F.manager]);
 const TYPE_ALIASES = { internal: 'Internal', external: 'External' };
 // Logical input (slot) -> the control id it has on the live form today. Resolved per stage (lib/resolve.mjs).
-const SLOT_ID = { title: F.title, purpose: F.purpose, type: F.type, owner: F.owner, allowance: F.allowance, timezone: F.timezone, tenantType: F.tenantType, tenantLicensing: F.tenantLicensing, tenantName: F.tenantName };
+export const SLOT_ID = { title: F.title, purpose: F.purpose, type: F.type, owner: F.owner, allowance: F.allowance, timezone: F.timezone, tenantType: F.tenantType, tenantLicensing: F.tenantLicensing, tenantName: F.tenantName };
 const TERMS_BOX = 'desitsm_agreetothetermsandconditions';
 // Portal-populated companions: always id-bound, never a --map target or a --field.
 const ID_BOUND = new Set([F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, TERMS_BOX, `${TERMS_BOX}One`]);
 // Dependents the selected type is expected to show: if one of these is gone, that is drift, not "does not apply".
-const APPLIES = { internal: ['allowance', 'timezone'], external: ['tenantType', 'tenantLicensing', 'tenantName'] };
+export const APPLIES = { internal: ['allowance', 'timezone'], external: ['tenantType', 'tenantLicensing', 'tenantName'] };
 // What each slot means, for System One questions (static text: never user or page data).
 const SLOT_DESC = {
   title: 'the free-text title of the request', purpose: 'the business purpose category of the subscription', type: 'whether the subscription is internal or external',
@@ -58,7 +58,8 @@ export class SkillError extends Error {
 }
 
 // ---------------------------------------------------------------- session
-export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true, browserPath, profileDir, blockResources = true, commitTimeoutMs = 120000, traceNet = false, log = () => {} } = {}) {
+// allowSubmit false (verify): the guard can never arm the submit gate, so no form POST can ever be sent.
+export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true, browserPath, profileDir, blockResources = true, commitTimeoutMs = 120000, traceNet = false, allowSubmit = true, log = () => {} } = {}) {
   const t0 = now();
   const marks = {};
   const mark = (k) => { marks[k] = Math.round(now() - t0); log(`mark ${k} ${marks[k]}ms`); };
@@ -66,7 +67,7 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
   if (profileDir) log(`profile: ${browser.persistent ? 'persistent' : 'throwaway (fallback)'}`);
   mark('browserLaunched');
   const cdp = browser.cdp;
-  const guard = createGuard({ formUrl, blockResources });
+  const guard = createGuard({ formUrl, blockResources, allowSubmit });
   const hooks = { onSubmit: null };
   const dialogs = [];
   const submitEvents = [];
@@ -120,7 +121,7 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
     if (body === undefined && typeof postData === 'string') body = Buffer.from(postData, 'utf8');
     const isMainFrame = sid === mainSid && frameId === mainTarget;
     const contentType = Object.entries(request.headers ?? {}).find(([k]) => k.toLowerCase() === 'content-type')?.[1];
-    const verdict = guard.classify({ method: request.method, url: request.url, resourceType, postData, contentType, isMainFrame });
+    const verdict = guard.classify({ method: request.method, url: request.url, resourceType, postData, contentType, isMainFrame, ref: networkId ? `${sid}|${networkId}` : null });
     if (verdict.action === 'continue' && verdict.reason === 'submit') {
       try { hooks.onSubmit?.(); } catch (e) {
         submitEvents.push({ at: Date.now(), error: `journal write failed: ${e.message}`, notDelivered: true });
@@ -177,6 +178,24 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
   };
   cdp.on('Network.loadingFinished', done);
   cdp.on('Network.loadingFailed', done);
+  // Witness (verify): an independent record, from the Network domain rather than the guard, of every portal write a
+  // page target put on the wire and whether the network answered it or the client blocked it. Keyed like the guard's
+  // ref (session|requestId); a redirect answers the previous hop.
+  const witness = [];
+  const witnessBy = new Map();
+  const portalOrigin = new URL(formUrl).origin;
+  cdp.on('Network.requestWillBeSent', (p, sid) => {
+    const key = `${sid}|${p.requestId}`;
+    if (p.redirectResponse && witnessBy.has(key)) Object.assign(witnessBy.get(key), { responded: true, status: p.redirectResponse.status });
+    let u = null;
+    try { u = new URL(p.request.url); } catch {}
+    if (!u || u.origin !== portalOrigin || READ.has(String(p.request.method).toUpperCase())) { witnessBy.delete(key); return; }
+    const e = { ref: key, method: String(p.request.method).toUpperCase(), path: u.pathname, type: p.type ?? null, phase: guard.phase, responded: false, blocked: false };
+    witness.push(e);
+    witnessBy.set(key, e);
+  });
+  cdp.on('Network.responseReceived', (p, sid) => { const e = witnessBy.get(`${sid}|${p.requestId}`); if (e) Object.assign(e, { responded: true, status: p.response?.status ?? null }); });
+  cdp.on('Network.loadingFailed', (p, sid) => { const e = witnessBy.get(`${sid}|${p.requestId}`); if (e && (p.blockedReason || /BLOCKED_BY_CLIENT/.test(p.errorText ?? ''))) e.blocked = true; });
   cdp.on('Page.javascriptDialogOpening', (p, sid) => {
     dialogs.push({ type: p.type, message: String(p.message).slice(0, 1000) });
     cdp.send('Page.handleJavaScriptDialog', { accept: p.type === 'alert' || p.type === 'beforeunload' }, sid).catch(() => {});
@@ -198,6 +217,7 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
     profile: browser.persistent ? 'persistent' : 'throwaway',
     formUrl, origin: new URL(formUrl).origin, page, cdp, guard, hooks, dialogs, submitEvents, marks, mark, log, headless,
     elapsed: () => Math.round(now() - t0),
+    witness: () => witness.map((e) => ({ ...e })),
     inflight: () => [...inflight.values()].map((a) => ({ ...a, age: Math.round(now() - a.t) })),
     // Fail closed: never keep operating if any web target runs without request interception.
     assertGuarded() { if (guardFailures.length) throw new SkillError('guard_unavailable', 'Request interception could not be enabled on every page target; refusing to continue.', { targets: guardFailures.slice() }); },
@@ -370,6 +390,9 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   const timings = {};
   const lap = (k) => { timings[k] = Math.round(now() - t0); s.log(`fill ${k} ${timings[k]}ms`); };
   const out = { resolved: {}, derived: {}, defaulted: [], inferred: [], missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
+  // How each slot was bound (or why not), for verify. Not enumerable: never part of plan output.
+  const bindings = {};
+  Object.defineProperty(out, 'bindings', { value: bindings, enumerable: false });
   // The effective input: what the user gave plus every applied default, made explicit so submit replays it exactly.
   const eff = { ...input, fields: { ...(input.fields ?? {}) }, map: { ...(input.map ?? {}) } };
   const call = (fn, ...a) => s.page.call(fn, ...a);
@@ -409,6 +432,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
       validators ??= await call(P.validatorIndex);
       r = resolveSlot(key, SLOT_ID[key], Object.values(fields), { ...opts, validators });
     }
+    bindings[key] = r.ok ? { tier: r.via, id: r.id } : { tier: r.code, id: r.id ?? null };
     if (r.ok) {
       fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field), ...(r.via === 'validator' ? { proof: sha256(stableStringify({ id: r.id, message: r.evidence.message })) } : {}) };
       claimed.add(r.id);

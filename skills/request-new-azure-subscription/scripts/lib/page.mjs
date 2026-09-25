@@ -61,6 +61,30 @@ export function pageState() {
   };
 }
 
+// verify: what Microsoft.Dynamic365.Portal.User exposes (the owner default reads email, else userName). Read-only.
+export function portalUser() {
+  const portal = window.Microsoft?.Dynamic365?.Portal;
+  const u = portal?.User;
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return { portal: !!portal, object: !!u && typeof u === 'object', email: str(u?.email), userName: str(u?.userName) };
+}
+
+// verify: per control id, how many elements carry it and the label the driver would read for it. `associated` is
+// true only when a label is found and every label pointing at the control (<id>_label, label[for]) reads the same.
+export function controlEvidence(ids) {
+  const txt = (s) => (s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const out = {};
+  for (const id of ids) {
+    const esc = window.CSS?.escape ? CSS.escape(id) : id;
+    const exact = document.querySelectorAll(`[id="${esc}"]`).length;
+    const count = exact || (document.querySelector(`input[type="radio"][id^="${esc}_"]`) ? 1 : 0);
+    const labels = [...new Set([document.getElementById(`${id}_label`), ...document.querySelectorAll(`label[for="${esc}"]`)].filter(Boolean))];
+    const texts = [...new Set(labels.map((l) => txt(l.textContent)))];
+    out[id] = { count, label: texts[0] ?? null, associated: labels.length > 0 && texts.length === 1 };
+  }
+  return out;
+}
+
 export function clickSignIn() {
   const b = document.querySelector('button[name="provider"]');
   if (!b) return false;
