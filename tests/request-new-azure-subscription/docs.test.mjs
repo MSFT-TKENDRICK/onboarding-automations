@@ -5,6 +5,7 @@ import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { join, dirname, basename, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HELP } from '../../skills/request-new-azure-subscription/scripts/mcaps-subscription.mjs';
+import { CHECK_IDS } from '../../skills/request-new-azure-subscription/scripts/lib/verify.mjs';
 
 const SKILL_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '../../skills/request-new-azure-subscription');
 const read = (p) => readFileSync(join(SKILL_DIR, p), 'utf8');
@@ -73,7 +74,14 @@ describe('SKILL.md frontmatter', () => {
     const tools = fm['allowed-tools'];
     assert.ok(tools && !tools.startsWith('['), 'space-separated string, not a YAML list');
     assert.doesNotMatch(tools, /submit/);
-    for (const c of ['plan', 'options', 'status']) assert.match(tools, new RegExp(`mcaps-subscription\\.mjs ${c}`));
+    for (const c of ['plan', 'options', 'status', 'verify']) assert.match(tools, new RegExp(`mcaps-subscription\\.mjs ${c}`));
+  });
+
+  it('every verify check id is documented in a CLI.md table row', () => {
+    const documented = new Set(tableRows(CLI).flatMap(backticked));
+    assert.deepEqual(CHECK_IDS.filter((id) => !documented.has(id)), []);
+    assert.match(read('references/PORTAL.md'), /^#+ Proving the live assumptions/m);
+    for (const a of ['A1', 'A2', 'A3', 'A4', 'A5', 'A6']) assert.match(read('references/PORTAL.md'), new RegExp(`\\b${a}\\b`));
   });
 
   it('metadata version is a quoted string', () => {

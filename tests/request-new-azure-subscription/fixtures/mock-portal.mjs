@@ -36,6 +36,8 @@ export const DEFAULTS = {
   apiFailAfterPost: false, // the Web API errors once a form POST has been received
   apiDelayMs: 80,
   termsText: 'You acknowledge that: access is monitored. Microsoft prohibits customer data in non-production subscriptions. I agree to the Terms and Conditions.',
+  // undefined: the signed-in user; null: Portal exposes no User; an object: exactly that User.
+  portalUser: undefined,
   drift: {},
 };
 
@@ -59,7 +61,7 @@ function page(cfg, { error } = {}) {
     row('desitsm_subscriptionowner', 'Subscription Owner', txt('desitsm_subscriptionowner', 'autocomplete="off"')),
     row('desitsm_eslabs_projectlevel', 'Reporting Manager', txt('desitsm_eslabs_projectlevel', 'readonly')),
     row('desitsm_tenantdisplayname', 'Tenant Display Name', txt('desitsm_tenantdisplayname', 'maxlength="50"')),
-    cfg.drift.removeField === 'desitsm_monthlyspend' ? '' : row('desitsm_monthlyspend', 'Monthly Allowance', sel('desitsm_monthlyspend', [['', ''], ...cfg.monthly.map((m) => [m, `$${m}`])])),
+    cfg.drift.removeField === 'desitsm_monthlyspend' ? '' : row('desitsm_monthlyspend', 'Monthly Allowance', sel('desitsm_monthlyspend', [['', ''], ...cfg.monthly.map((m) => (Array.isArray(m) ? m : [m, `$${m}`]))])),
     cfg.drift.removeField === 'desitsm_timezonelist' ? '' : row('desitsm_timezonelist', 'Time Zone', sel('desitsm_timezonelist', [['', 'Select'], ...cfg.timezones])),
     cfg.drift.extraRequired ? row(cfg.drift.extraRequired.id, cfg.drift.extraRequired.label, sel(cfg.drift.extraRequired.id, [['', 'Select'], ['1', 'Yes'], ['2', 'No']])) : '',
     row(honeypot, 'Leave this field blank', `<input type="text" id="${honeypot}" name="${honeypot}"/>`, false),
@@ -82,10 +84,12 @@ ${error ? `<div id="ValidationSummaryEntityFormView" class="validation-summary a
 <a href="#" onclick="showTermsAndConditionModal();return false;">Terms and Conditions</a>
 <div class="actions"><input type="button" id="InsertButton" name="${INSERT}" value="Submit" disabled="disabled" onclick="javascript:if(typeof entityFormClientValidate === 'function'){if(entityFormClientValidate()){if(typeof Page_ClientValidate === 'function'){if(Page_ClientValidate('')){this.value = 'Processing...';}}}else{return false;}};WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;${INSERT}&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, true))"/></div>
 </form>
-<script>window.Microsoft = { Dynamic365: { Portal: { User: ${JSON.stringify({ contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn })} } } };</script>
-<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null, validatorLabel: d.validatorLabel ?? null })};</script>
+<script>window.Microsoft = { Dynamic365: { Portal: ${JSON.stringify(portalOf(cfg))} } };</script>
+<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null, validatorLabel: d.validatorLabel ?? null, noValidator: d.noValidator ?? [], validatorControl: d.validatorControl ?? {}, fillWrites: !!d.fillWrites })};</script>
 <script src="/mock-portal.js"></script></body></html>`);
 }
+
+const portalOf = (cfg) => (cfg.portalUser === null ? {} : { User: cfg.portalUser ?? { contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn } });
 
 // drift.rename {oldId: newId}: the portal renamed a control (id, name, label-for and every script reference).
 function renameIds(drift, text) {
@@ -122,9 +126,10 @@ let subscriptionPurposeOptions = '';
   if (C.dup) REQUIRED.push(C.dup.id);
   // Live shape: a RequiredFieldValidator per control, message naming the label as rendered at load (or, with
   // drift.validatorLabel, the label the portal's validator still carries after a relabel).
-  window.Page_Validators = REQUIRED.filter(function (id) { return !!$id(id); }).map(function (id) {
+  // drift.noValidator [ids]: no validator for those controls; drift.validatorControl {id: other}: it validates another control.
+  window.Page_Validators = REQUIRED.filter(function (id) { return !!$id(id) && C.noValidator.indexOf(id) < 0; }).map(function (id) {
     var label = (C.validatorLabel && C.validatorLabel[id]) || ($id(id + '_label') || {}).textContent || id;
-    return { controltovalidate: id, enabled: true, isvalid: true, errormessage: "<a href='#" + id + "_label' onclick='javascript:scrollToAndFocus(\"" + id + "_label\",\"" + id + "\");return false;' referenceControlId=" + id + ">" + label + " is a required field. </a>", _id: id };
+    return { controltovalidate: C.validatorControl[id] || id, enabled: true, isvalid: true, errormessage: "<a href='#" + id + "_label' onclick='javascript:scrollToAndFocus(\"" + id + "_label\",\"" + id + "\");return false;' referenceControlId=" + id + ">" + label + " is a required field. </a>", _id: id };
   });
   window.Page_ClientValidate = function () {
     var msgs = [];
@@ -188,6 +193,12 @@ let subscriptionPurposeOptions = '';
     if (C.extraRequired) show(C.extraRequired, internal);
     if (C.dup) show(C.dup.id, visible(C.dup.of));
     if (external) modal('Note', 'This section is for a dedicated tenant environment with trial licensing.');
+    // drift.fillWrites: page script writes to the portal while the form is filled (every method and transport).
+    if (C.fillWrites) {
+      ['POST', 'PUT', 'PATCH', 'DELETE'].forEach(function (m) { fetch('/_api/mock_write', { method: m, body: 'x' }).catch(function () {}); });
+      var x = new XMLHttpRequest(); x.open('POST', '/_api/mock_write'); x.send('x');
+      if (navigator.sendBeacon) navigator.sendBeacon('/_api/mock_write', 'x');
+    }
     eligibility();
   });
   if ($id('desitsm_monthlyspend')) $id('desitsm_monthlyspend').addEventListener('change', function () { $id('desitsm_estimatedmonthlyspend').value = this.value; });
@@ -290,7 +301,7 @@ export async function startMockPortal(overrides = {}) {
       const top = Number(u.searchParams.get('$top')) || 5000;
       return json(res, { value: state.records.filter((r) => (!contact || r._apitil_contact_value === contact[1]) && (!num || r.apitil_requestnumber === num[1]) && !(cfg.hideCreated && r._fields)).slice(0, top).map(({ _fields, ...r }) => r) });
     }
-    if (u.pathname === '/' && req.method === 'GET') return html(res, `<html><body><script>window.Microsoft={Dynamic365:{Portal:{User:{contactId:'${cfg.me.contactId}',email:'${cfg.me.upn}',userName:'${cfg.me.upn}'}}}};</script>Home</body></html>`);
+    if (u.pathname === '/' && req.method === 'GET') return html(res, `<html><body><script>window.Microsoft={Dynamic365:{Portal:${JSON.stringify(portalOf(cfg))}}};</script>Home</body></html>`);
     if (u.pathname === FORM_PATH && u.searchParams.get('ServiceId') === SERVICE) {
       if (req.method === 'GET') return html(res, page(cfg));
       if (req.method === 'POST') {
