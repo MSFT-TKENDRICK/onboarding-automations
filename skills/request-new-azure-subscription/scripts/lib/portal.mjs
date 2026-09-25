@@ -3,6 +3,7 @@ import { pageSession } from './cdp.mjs';
 import { launchBrowser } from './browser.mjs';
 import { createGuard } from './guard.mjs';
 import { matchOption, matchOwner, ownerSearchTerm, normalize } from './match.mjs';
+import { DEFAULT_TYPE, highestAmount, onlyOption, defaultTitle } from './defaults.mjs';
 import { planId as hashPlan, sha256, stableStringify, requestKey, acquireSubmitLock, markSent, recordOutcome, releaseUnsent } from './plan-store.mjs';
 import * as P from './page.mjs';
 
@@ -331,28 +332,49 @@ export async function fill(s, input, opts) {
   }
 }
 
-async function fillForm(s, input, { discover = false } = {}) {
+async function fillForm(s, input, { discover = false, defaults = true, timeZone = null } = {}) {
   const t0 = now();
   const timings = {};
   const lap = (k) => { timings[k] = Math.round(now() - t0); s.log(`fill ${k} ${timings[k]}ms`); };
-  const out = { resolved: {}, derived: {}, missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
+  const out = { resolved: {}, derived: {}, defaulted: [], missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
+  // The effective input: what the user gave plus every applied default, made explicit so submit replays it exactly.
+  const eff = { ...input, fields: { ...(input.fields ?? {}) } };
   const call = (fn, ...a) => s.page.call(fn, ...a);
   const drainModals = async () => { classifyModals(await call(P.takeModals), out); await call(P.hideModals); };
   let fields = byId(await call(P.snapshotFields));
   const refresh = async () => { fields = byId(await call(P.snapshotFields)); };
 
-  const choose = async (key, id, kind, wanted = input[key]) => {
+  const defaultFor = (key, f) => {
+    if (!defaults) return null;
+    if (key === 'type') {
+      // Tenant values only apply to External subscriptions: defaulting to Internal would silently drop them.
+      if (['tenantType', 'tenantLicensing', 'tenantName'].some((k) => input[k] !== undefined)) return null;
+      return { value: DEFAULT_TYPE, reason: 'Internal subscription unless the user asks for external' };
+    }
+    if (key === 'allowance') { const o = f.tag === 'select' && highestAmount(f.options); return o ? { value: o.value, reason: 'Highest monthly allowance offered' } : null; }
+    if (key === 'timezone') return timeZone ? { value: timeZone, reason: `This computer's time zone (${timeZone})` } : null;
+    if (key === 'title') { const t = defaultTitle(out.resolved.owner?.upn); return t ? { value: t, reason: "Owner alias and today's date" } : null; }
+    if (['purpose', 'tenantType', 'tenantLicensing'].includes(key) && f.tag === 'select') { const o = onlyOption(f.options); return o ? { value: o.value, reason: 'The only option offered' } : null; }
+    return null;
+  };
+  const missingEntry = (key, id, f) => ({ field: key, id, label: f.label, ...(f.tag === 'select' ? { options: optionsOf(f) } : {}) });
+
+  const choose = async (key, id, kind, given = input[key]) => {
     const f = fields[id];
     if (!f || !f.visible) {
-      if (wanted !== undefined) out.errors.push({ code: 'field_unavailable', field: key, id, message: `${key} is not shown on the form for the current selections.` });
+      if (given !== undefined) out.errors.push({ code: 'field_unavailable', field: key, id, message: `${key} is not shown on the form for the current selections.` });
       return false;
     }
     if (f.tag === 'select') out.options[key] = optionsOf(f);
-    if (wanted === undefined) { out.missing.push({ field: key, id, label: f.label, ...(f.tag === 'select' ? { options: optionsOf(f) } : {}) }); return false; }
+    const dflt = given === undefined ? defaultFor(key, f) : null;
+    const wanted = given ?? dflt?.value;
+    if (wanted === undefined) { out.missing.push(missingEntry(key, id, f)); return false; }
     let value = wanted;
     let label = wanted;
     if (f.tag === 'select') {
       const m = matchOption(f.options, key === 'type' ? (TYPE_ALIASES[normalize(wanted)] ?? wanted) : wanted, { kind });
+      // A default that does not map to exactly one option is simply not applied: ask the user instead.
+      if (!m.ok && dflt) { out.missing.push(missingEntry(key, id, f)); return false; }
       if (!m.ok) { out.errors.push({ code: m.error === 'ambiguous' ? 'ambiguous_option' : 'invalid_option', field: key, id, wanted, candidates: m.candidates }); return false; }
       ({ value, label } = m);
     } else if (f.type !== 'text' && f.tag !== 'textarea') {
@@ -361,38 +383,49 @@ async function fillForm(s, input, { discover = false } = {}) {
     const r = await call(P.setField, id, value);
     if (!r.ok) { out.errors.push({ code: 'set_failed', field: key, id, wanted, detail: r.error ?? `value became ${JSON.stringify(r.value)}` }); return false; }
     out.resolved[key] = f.tag === 'select' ? { value, label } : { value };
+    if (dflt) { eff[key] = value; out.defaulted.push({ field: key, value: label, reason: dflt.reason }); }
     return true;
   };
 
   // 1) purpose (drives visibility of everything else)
   if (!(await choose('purpose', F.purpose))) {
-    for (const k of ['title', 'type', 'owner']) if (input[k] === undefined) out.missing.push({ field: k });
+    if (!defaults) for (const k of ['title', 'type', 'owner']) if (input[k] === undefined) out.missing.push({ field: k });
     return finish();
   }
   await s.quiet(); lap('purpose');
   await drainModals();
   await refresh();
 
-  // 2) owner BEFORE type: the portal only runs owner eligibility on type change.
-  if (input.owner === undefined) out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label });
+  // 2) owner BEFORE type: the portal only runs owner eligibility on type change. Default: the signed-in user.
+  let ownerWanted = input.owner;
+  const ownerDefault = ownerWanted === undefined && defaults ? (await s.state())?.userEmail ?? null : null;
+  if (ownerDefault) ownerWanted = ownerDefault;
+  const ownerErrors = out.errors.length;
+  if (ownerWanted === undefined) out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label });
   else if (!fields[F.owner]?.visible) out.errors.push({ code: 'field_unavailable', field: 'owner', id: F.owner });
   else {
     let term;
-    try { term = ownerSearchTerm(input.owner); } catch (e) { out.errors.push({ code: 'invalid_owner', field: 'owner', message: e.message }); }
+    try { term = ownerSearchTerm(ownerWanted); } catch (e) { out.errors.push({ code: 'invalid_owner', field: 'owner', message: e.message }); }
     if (term) {
       const sug = await call(P.ownerSuggestions, F.owner, term, 20000);
       lap('ownerSuggestions');
-      if (!sug.ok) out.errors.push({ code: 'owner_not_found', field: 'owner', wanted: input.owner, message: 'No directory suggestions for that owner.' });
+      if (!sug.ok) out.errors.push({ code: 'owner_not_found', field: 'owner', wanted: ownerWanted, message: 'No directory suggestions for that owner.' });
       else {
-        const m = matchOwner(sug.items, input.owner);
-        if (!m.ok) out.errors.push({ code: m.error === 'ambiguous' ? 'ambiguous_owner' : 'owner_not_found', field: 'owner', wanted: input.owner, candidates: m.candidates });
+        const m = matchOwner(sug.items, ownerWanted);
+        if (!m.ok) out.errors.push({ code: m.error === 'ambiguous' ? 'ambiguous_owner' : 'owner_not_found', field: 'owner', wanted: ownerWanted, candidates: m.candidates });
         else {
           const picked = await call(P.pickSuggestion, sug.items[m.index], F.ownerGuid, 15000);
-          if (!picked.ok) out.errors.push({ code: 'owner_not_bound', field: 'owner', wanted: input.owner, detail: picked.error });
-          else { out.resolved.owner = { display: m.display, upn: m.upn, matchedBy: m.matchedBy }; await s.quiet(); }
+          if (!picked.ok) out.errors.push({ code: 'owner_not_bound', field: 'owner', wanted: ownerWanted, detail: picked.error });
+          else {
+            out.resolved.owner = { display: m.display, upn: m.upn, matchedBy: m.matchedBy };
+            if (ownerDefault) { eff.owner = ownerDefault; out.defaulted.push({ field: 'owner', value: m.display ? `${m.display} (${m.upn})` : m.upn, reason: 'The signed-in user' }); }
+            await s.quiet();
+          }
         }
       }
     }
+    // The signed-in user could not be bound as owner: ask rather than report an error for a value nobody typed.
+    if (ownerDefault && !out.resolved.owner) { out.errors.splice(ownerErrors); out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label }); }
   }
   lap('owner');
   await drainModals();
@@ -472,6 +505,7 @@ async function fillForm(s, input, { discover = false } = {}) {
     out.status = out.blockers.length ? 'blocked' : out.errors.length ? 'invalid' : out.missing.length ? 'needs_input' : 'ready';
     if (discover) out.fields = Object.values(fields).filter((f) => f.visible).map((f) => ({ id: f.id, label: f.label, required: f.required, value: f.value, ...(f.options ? { options: optionsOf(f) } : {}) }));
     out.dialogs = s.dialogs.splice(0);
+    out.input = eff;
     timings.total = Math.round(now() - t0);
     out.timings = timings;
     return out;
@@ -522,7 +556,8 @@ export async function findDuplicates(s, contactId, title) {
 
 export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeoutMs = 90000 } = {}) {
   const t0 = now();
-  const r = await fill(s, plan.input);
+  // The plan's input already carries every default explicitly; never re-default at submit time.
+  const r = await fill(s, plan.input, { defaults: false });
   s.mark('filled');
   if (r.status !== 'ready') return { outcome: 'not_submitted', reason: 'plan_no_longer_ready', status: r.status, missing: r.missing, errors: r.errors, blockers: r.blockers };
   const material = planMaterial(s.formUrl, plan.input, r);

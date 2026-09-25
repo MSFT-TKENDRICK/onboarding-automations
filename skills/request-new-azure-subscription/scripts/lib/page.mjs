@@ -47,6 +47,7 @@ export function pageState() {
     purposeInit: typeof subscriptionPurposeOptions === 'undefined' ? null : String(subscriptionPurposeOptions).length > 0,
     purposeLoading: !!purpose && purpose.classList.contains('ui-autocomplete-loading'),
     contactId: document.getElementById('apitil_contact')?.value || window.Microsoft?.Dynamic365?.Portal?.User?.contactId || null,
+    userEmail: window.Microsoft?.Dynamic365?.Portal?.User?.email || window.Microsoft?.Dynamic365?.Portal?.User?.userName || null,
     insertEnabled: !!document.getElementById('InsertButton') && !document.getElementById('InsertButton').disabled,
     mcaps: typeof McapsResponse === 'undefined' ? null : String(McapsResponse),
     summary: txt(document.querySelector('.validation-summary')?.offsetParent ? document.querySelector('.validation-summary').textContent : ''),

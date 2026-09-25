@@ -16,24 +16,28 @@ Use this skill to submit an MCAPS Services request for a new MCAPS, ESLabs, or i
 All portal work goes through one script, `scripts/mcaps-subscription.mjs` (run it with the skill directory's path). It drives a headless Edge over the DevTools protocol (a private pipe, no network port) using the user's own corporate SSO. It prints one JSON object on stdout. It blocks every write to the portal except the single submission, and that POST can only carry the values verified in the plan. Exit codes: `0` command succeeded, `2` needs input/blocked/not submitted/rejected/not found, `3` outcome unknown, `1` error. [references/CLI.md](references/CLI.md) documents every flag, output field and error code.
 
 1. **Collect request details**
-   Ask for or derive every value from the user's instructions:
-   - title
-   - purpose
-   - subscription type (`internal` or `external`, plus the tenant fields for external)
-   - owner (alias, email or full name)
-   - monthly allowance
-   - time zone
+   Take the values the user gave; everything else has a safe default that `plan` fills in and reports in `defaulted`:
 
-   Treat all people and field selections as run-specific inputs; never reuse values from an earlier request. The portal derives the reporting manager from the owner; if the user named a different manager, point out the discrepancy. If you don't know which options are valid, run `node <skill>/scripts/mcaps-subscription.mjs options --type internal` and offer the current lists.
+   | Field | Default when not given |
+   |---|---|
+   | subscription type | `internal`; asked for instead when tenant values are given (they only apply to external) |
+   | monthly allowance | the highest amount offered |
+   | owner (alias, email or full name) | the signed-in user |
+   | time zone | this computer's zone (`MCAPS_TIMEZONE` overrides); asked for when it matches no single option |
+   | title | `<owner alias> Azure subscription <YYYY-MM-DD>` |
+   | purpose, tenant fields | the option, when the portal offers exactly one; otherwise asked for |
+
+   Treat all people and field selections as run-specific inputs; never reuse values from an earlier request. The portal derives the reporting manager from the owner; if the user named a different manager, point out the discrepancy. If you don't know which options are valid, run `node <skill>/scripts/mcaps-subscription.mjs options --type internal` and offer the current lists. Pass `--no-defaults` when the user wants to choose every value.
 2. **Plan against the live form (never submits)**
-   Run `plan` with every value, for example:
+   Run `plan` with the values the user gave, for example:
+   `node <skill>/scripts/mcaps-subscription.mjs plan --purpose "Hybrid"` or, fully specified,
    `node <skill>/scripts/mcaps-subscription.mjs plan --title "…" --purpose "…" --type internal --owner alias@microsoft.com --allowance 500 --timezone "Pacific Time"`.
    Plan fills the live form with writes blocked. It then matches each value to the current option lists, runs the portal's own eligibility checks, derives the manager, reads the current terms and saves a `planId`.
-   - `needs_input` / `invalid`: ask the user about each entry in `missing` / `errors`, offering the listed options. Never pick a value yourself.
+   - `needs_input` / `invalid`: ask the user about each entry in `missing` / `errors`, offering the listed options. Never pick a value yourself beyond the documented defaults.
    - `blocked`: report each blocker (for example an existing active request, or an owner without MCAPS access) and stop.
    - Errors: `vpn_required` or `portal_unreachable` means check the corporate network/VPN and rerun. `auth_required` means rerun with `--headed` and let the user finish sign-in in the window; never handle their credentials. `no_eligible_purpose` means report the portal's message.
 3. **Present the plan**
-   Show the resolved values, the derived manager, any `warnings` (especially `possible_duplicate`), and the complete terms text from `terms.text`.
+   Show the resolved values, calling out every `defaulted` value so the user can override it (re-run `plan` with the changed flag), the derived manager, any `warnings` (especially `possible_duplicate`), and the complete terms text from `terms.text`.
 4. **Confirm terms acceptance**
    Ask the user to explicitly accept those terms immediately before submission. Stop if they decline, hesitate, or change any value. A changed value needs a new `plan`. Only use the `terms.sha` from the plan the user just reviewed; never reuse one from an earlier run or copy it without showing the terms.
 5. **Submit the subscription request exactly once**

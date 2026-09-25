@@ -78,6 +78,7 @@ ${error ? `<div id="ValidationSummaryEntityFormView" class="validation-summary a
 <a href="#" onclick="showTermsAndConditionModal();return false;">Terms and Conditions</a>
 <div class="actions"><input type="button" id="InsertButton" name="${INSERT}" value="Submit" disabled="disabled" onclick="javascript:if(typeof entityFormClientValidate === 'function'){if(entityFormClientValidate()){if(typeof Page_ClientValidate === 'function'){if(Page_ClientValidate('')){this.value = 'Processing...';}}}else{return false;}};WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;${INSERT}&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, true))"/></div>
 </form>
+<script>window.Microsoft = { Dynamic365: { Portal: { User: ${JSON.stringify({ contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn })} } } };</script>
 <script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null })};</script>
 <script src="/mock-portal.js"></script></body></html>`;
 }
