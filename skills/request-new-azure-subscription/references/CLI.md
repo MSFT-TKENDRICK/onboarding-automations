@@ -131,10 +131,10 @@ Only these and the common flags are accepted. Any `--purpose` or `--type` run ex
 
 | Check `id` | Assumption | `evidence` |
 |---|---|---|
-| `portal_user` | A1: the form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`), and the owner default binds to it in every scenario. | `present`, `used`, masked `email`/`userName`, `owner: { bound, reached, defaulted, upn, guid }`, per-scenario `scenarios` |
+| `portal_user` | A1: the form page exposes the signed-in user as `Microsoft.Dynamic365.Portal.User` (`email` or `userName`), and the owner default binds to it in every observable scenario. A scenario is `unobservable: 'active_request'` when the portal's active-request alert names that user and the portal then clears the owner. Such a scenario is excluded. A1 still needs a GUID binding elsewhere, and is `null` if every scenario is unobservable. | `present`, `used`, masked `email`/`userName`, `owner: { bound, reached, defaulted, upn, guid }`, per-scenario `scenarios` (with `unobservable` when excluded) |
 | `allowance_labels` | A2: every Monthly Allowance label parses to an amount and the highest amount is unique. | Per scenario: `labels`, `amounts`, `max`, `maxCount`, `chosen`, `selected`, `defaulted` |
 | `field_ids` | A3: each slot's control has the expected id and its canonical label. | Per slot: `expectedId`, `id`, `label`, `canonical`, `tier`, `pass` (on failure also `problems`; `unverifiedIn` for scenarios that never bound it); `unchecked` slots |
-| `validators` | A4: an enabled required-field validator names each slot's canonical label and points at its expected id. | Per slot: `messages`, `controls`, `enabled`, `proof` (`validatorProof` for the expected id), `pass`, `unverifiedIn`; `unchecked` slots |
+| `validators` | A4: an enabled required-field validator names each slot's canonical label and points at its expected id (its `controltovalidate`, else the `setFocusAndScrollPosition` focus id). For the allowance, the declared carrier counts as the select. | Per slot: `messages`, `controls`, `enabled`, `proof` (`validatorProof` for the expected id), `pass`, `unverifiedIn`; `unchecked` slots |
 | `timezone_default` | A5: the default zone (`MCAPS_TIMEZONE`, else the OS zone) matches exactly one option; a UTC offset shown in its label must agree. | Per scenario: `zone`, `source`, `os`, `matched`, `candidates`, `offset`, `offsetAgrees`, `selected`, `defaulted` |
 | `writes_blocked` | A6: while filling, no portal POST, PUT, PATCH or DELETE got through except sign-in. | `blocked` and `allowed` counts by method (`allowed` also by reason), `portalAllowedOutsideSignIn`, `submitsSent`, `everArmed`, `witness` (the browser's own network view: `observed`, `responded`, `blockedByClient`, `uncorrelated`), `violations` |
 
@@ -179,7 +179,7 @@ Only these and the common flags are accepted. Any `--purpose` or `--type` run ex
 | `owner_cleared` | The portal cleared the owner after its eligibility checks. |
 | `manager_missing` | No reporting manager was populated for the owner. |
 | `terms_unavailable` | The terms could not be read. |
-| `form_drift` | The owner control changed (never auto-healed), a bound control no longer posts the value that was set (`reason`: `unbound`, `value_changed`), or the form has a file upload (`file_input`). |
+| `form_drift` | The owner control changed (never auto-healed), a bound control no longer posts the value that was set (`reason`: `unbound`, `value_changed`; for the allowance, through its declared carrier input), or the form has a file upload (`file_input`). |
 
 A blocker can't be fixed by changing flags; report it.
 
