@@ -259,10 +259,21 @@ export function validatorIndex() {
     })
     .replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
   const off = (v) => v.enabled === false || /^(false|0)$/i.test(String(v.enabled ?? '').trim());
+  // Live RequiredFieldValidators carry no controltovalidate; their message focuses the control instead. That id only
+  // counts when it is a real element inside liquid_form (the validator's own id can differ: apitil_contact vs _name).
+  const focused = (v) => {
+    const m = /setFocusAndScrollPosition\(\s*['"]?([\w-]+)/.exec(String(v.errormessage ?? ''));
+    if (!m || typeof document === 'undefined') return null;
+    const el = document.getElementById(m[1]);
+    const form = document.getElementById('liquid_form');
+    return el && form && form !== el && form.contains(el) ? m[1] : null;
+  };
   const out = [];
   for (const v of window.Page_Validators || []) {
-    if (!v || typeof v.controltovalidate !== 'string' || !v.controltovalidate) continue;
-    out.push({ control: v.controltovalidate, message: text(v.errormessage), enabled: !off(v) });
+    if (!v) continue;
+    const control = typeof v.controltovalidate === 'string' && v.controltovalidate ? v.controltovalidate : focused(v);
+    if (!control) continue;
+    out.push({ control, message: text(v.errormessage), enabled: !off(v) });
   }
   return out;
 }
