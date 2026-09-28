@@ -1,6 +1,6 @@
 // `verify`: a read-only proof of the live-portal assumptions the driver depends on (PORTAL.md, A1-A6).
 // Every check fails closed: a check that could not run is pass:null, and only pass===true counts.
-import { SLOTS, CANON, AMOUNT, normLabel } from './resolve.mjs';
+import { SLOTS, CANON, AMOUNT, normLabel, CARRIERS } from './resolve.mjs';
 import { validatorLabel, validatorProof } from './drift.mjs';
 import { matchOption } from './match.mjs';
 import { systemTimeZone } from './defaults.mjs';
@@ -55,6 +55,18 @@ const labelOffset = (label) => {
 
 // A1: Portal.User exposes the signed-in user, and in every scenario that reached the owner step the owner default
 // bound exactly that user. A scenario that was expected to reach it and did not leaves the check unproven (null).
+// A named portal rule can make the binding unobservable: the portal raised active_request naming that very user and
+// then cleared the owner it had matched. That scenario is excluded (neither proof nor refutation); A1 then needs a
+// GUID binding elsewhere, and is null if every scenario was unobservable.
+const unobservable = (o, identity) => {
+  const rules = o.rules ?? [];
+  const who = identity.toLowerCase();
+  return !o.guid && !!o.defaulted && String(o.upn ?? '').toLowerCase() === who
+    && rules.some((r) => r.code === 'owner_cleared')
+    && rules.some((r) => r.code === 'active_request' && String(r.message ?? '').toLowerCase().includes(`(${who})`))
+    ? 'active_request' : null;
+};
+
 export function checkPortalUser(scenarios) {
   const idOf = (u) => u?.email || u?.userName || null;
   const rows = [];
@@ -66,26 +78,31 @@ export function checkPortalUser(scenarios) {
     if (!identity) { rows.push({ ...base, s, bound: false, pass: false, why: 'no identity' }); continue; }
     if (!o.reached) { if (expects(s, 'owner')) rows.push({ ...base, s, bound: false, pass: null, why: 'not reached' }); continue; }
     const bound = !!o.defaulted && String(o.upn ?? '').toLowerCase() === identity.toLowerCase() && !!o.guid;
+    const rule = bound ? null : unobservable(o, identity);
+    if (rule) { rows.push({ ...base, s, bound: false, pass: null, unobservable: rule, why: 'unobservable' }); continue; }
     rows.push({ ...base, s, bound, pass: bound, why: bound ? null : 'not bound' });
   }
-  const shownRow = rows.find((r) => r.pass === false) ?? rows.find((r) => r.pass === null) ?? rows[0];
+  const counted = rows.filter((r) => !r.unobservable);
+  const shownRow = counted.find((r) => r.pass === false) ?? counted.find((r) => r.pass === null) ?? counted[0] ?? rows[0];
   const u = shownRow?.s.user ?? scenarios[0]?.user ?? { present: false };
   const identity = idOf(u);
   const used = u.email ? 'email' : u.userName ? 'userName' : null;
   const reached = rows.filter((r) => r.reached);
   const shown = (shownRow?.reached ? shownRow.s.owner : reached[0]?.s.owner) ?? null;
-  const pass = rows.length ? combine(rows.map((r) => r.pass)) : null;
+  const pass = counted.length ? combine(counted.map((r) => r.pass)) : null;
   const evidence = {
     present: !!identity, email: maskIdentity(u.email ?? null), userName: maskIdentity(u.userName ?? null), used,
     owner: { bound: pass === true, reached: reached.length, defaulted: !!shown?.defaulted, upn: maskIdentity(shown?.upn ?? null), guid: !!shown?.guid },
-    scenarios: rows.map(({ scenario, present, reached: r, bound, pass: p }) => ({ scenario, present, reached: r, bound, pass: p })),
+    scenarios: rows.map(({ scenario, present, reached: r, bound, pass: p, unobservable: un }) => ({ scenario, present, reached: r, bound, pass: p, ...(un ? { unobservable: un } : {}) })),
   };
   const names = (why) => rows.filter((r) => r.why === why).map((r) => r.scenario).join(', ');
-  if (pass === true) return check('portal_user', true, evidence, `Portal.User.${used} is present and the owner default bound to it (a resolved GUID) in every scenario.`);
+  const excluded = names('unobservable') ? ` Excluded as unobservable (the portal's active_request rule named this user and cleared the owner): ${names('unobservable')}.` : '';
+  if (pass === true) return check('portal_user', true, evidence, `Portal.User.${used} is present and the owner default bound to it (a resolved GUID) in every observable scenario.${excluded}`);
   if (pass === false) return check('portal_user', false, evidence, names('no identity')
     ? `Microsoft.Dynamic365.Portal.User exposes neither email nor userName (in ${names('no identity')}), so the owner cannot default.`
     : `Portal.User is present but the owner default did not bind to that user with a resolved GUID (in ${names('not bound')}).`);
-  return check('portal_user', null, evidence, `The owner step never ran${names('not reached') ? ` in ${names('not reached')}` : ''} (an earlier field failed), so the owner default is unproven.`);
+  if (!counted.length && rows.length) return check('portal_user', null, evidence, `The owner binding was unobservable in every scenario, so it is unproven.${excluded}`);
+  return check('portal_user', null, evidence, `The owner step never ran${names('not reached') ? ` in ${names('not reached')}` : ''} (an earlier field failed), so the owner default is unproven.${excluded}`);
 }
 
 // A2: every Monthly Allowance label parses to an amount, the highest is unique, and the page holds it by default.
@@ -158,13 +175,16 @@ export function checkFieldIds(scenarios) {
 export function checkValidators(scenarios) {
   const slots = {};
   for (const k of checkedSlots(scenarios)) {
+    const car = CARRIERS[k];
+    const aliases = car ? { [car.id]: car.of } : {};
     const recs = scenarios.filter((s) => covers(s, k)).map((s) => {
       const expectedId = s.slots[k].expectedId;
       const vals = s.validators ?? [];
       const naming = vals.filter((v) => validatorLabel(v.message, CANON[k], { anchored: true }));
       const own = naming.filter((v) => v.enabled !== false);
-      const independent = own.length > 0 && own.every((v) => v.control === expectedId);
-      const p = validatorProof(k, vals, new Set([expectedId]), CANON);
+      // The declared carrier is the same control as its select for this slot only (live: the Range validator sits on it).
+      const independent = own.length > 0 && own.every((v) => (Object.hasOwn(aliases, v.control) ? aliases[v.control] : v.control) === expectedId);
+      const p = validatorProof(k, vals, new Set([expectedId]), CANON, { context: s.labels ?? [], aliases });
       const proof = p.ok ? { ok: true, id: p.id } : { ok: false, reason: p.reason };
       return { s, expectedId, messages: naming.map((v) => v.message), controls: [...new Set(naming.map((v) => v.control))], enabled: own.length, proof, pass: independent && p.ok && p.id === expectedId };
     });
@@ -334,8 +354,10 @@ export async function runVerify(s, { purpose, type, env = process.env } = {}) {
       const name = `${p.label}/${t}`;
       records.push({
         name, type: t, pageUrl, expected, applies, slots, validators,
+        labels: Object.values(snap).map((f) => ({ id: f.id, label: f.label ?? null })),
         user: { present: !!(user.email || user.userName), email: user.email, userName: user.userName },
-        owner: { reached: !!b.owner, defaulted: defaulted('owner'), upn: r.resolved.owner?.upn ?? null, guid: GUID.test(r.derived?.ownerGuid ?? '') },
+        owner: { reached: !!b.owner, defaulted: defaulted('owner'), upn: r.resolved.owner?.upn ?? null, guid: GUID.test(r.derived?.ownerGuid ?? ''),
+          rules: (r.blockers ?? []).filter((x) => x.code === 'active_request' || x.code === 'owner_cleared').map((x) => ({ code: x.code, message: x.message ?? null })) },
         allowance: choice('allowance'),
         timezone: tz && { ...tz, zone, source, os },
       });

@@ -89,6 +89,88 @@ describe('portal_user (A1)', () => {
   });
 });
 
+describe('portal_user (A1): a portal eligibility rule that clears the owner (live F1)', () => {
+  const MSG = 'The subscription owner (testuser@contoso.com) currently has active service requests in progress. Please wait for the existing requests to complete or close them before submitting a new one.';
+  const cleared = (over = {}) => ({ reached: true, defaulted: true, upn: 'testuser@contoso.com', guid: false,
+    rules: [{ code: 'active_request', message: MSG }, { code: 'owner_cleared', message: 'The portal cleared the subscription owner after eligibility checks.' }], ...over });
+
+  it('marks the scenario unobservable (active_request) and passes on the other scenario\'s GUID binding', () => {
+    const c = checkPortalUser([scen('internal', { owner: cleared() }), scen('external')]);
+    assert.equal(c.pass, true, c.detail);
+    const internal = c.evidence.scenarios.find((x) => x.scenario === 'Hybrid/internal');
+    assert.equal(internal.unobservable, 'active_request');
+    assert.equal(internal.pass, null);
+    assert.equal(c.evidence.scenarios.find((x) => x.scenario === 'Hybrid/external').pass, true);
+    assert.match(c.detail, /unobservable/);
+    assert.match(c.detail, /Hybrid\/internal/);
+  });
+
+  it('is null (never a pass) when every scenario is unobservable', () => {
+    const c = checkPortalUser([scen('internal', { owner: cleared() }), scen('external', { owner: cleared() })]);
+    assert.equal(c.pass, null);
+    assert.match(c.detail, /unobservable/);
+  });
+
+  it('needs the rule\'s own witness: the message must name the Portal.User identity, the default must have matched it', () => {
+    const variants = {
+      'message names someone else': cleared({ rules: [{ code: 'active_request', message: MSG.replace('testuser@', 'other@') }, { code: 'owner_cleared' }] }),
+      'API-only active_request (no identity in the message)': cleared({ rules: [{ code: 'active_request', message: 'The owner already has 1 active request(s) of this type.' }, { code: 'owner_cleared' }] }),
+      'owner not cleared': cleared({ rules: [{ code: 'active_request', message: MSG }] }),
+      'no active_request rule': cleared({ rules: [{ code: 'owner_cleared' }] }),
+      'default bound another user': cleared({ upn: 'other@contoso.com' }),
+      'owner was not defaulted': cleared({ defaulted: false }),
+    };
+    for (const [name, owner] of Object.entries(variants)) {
+      const c = checkPortalUser([scen('internal', { owner }), scen('external')]);
+      assert.equal(c.pass, false, name);
+      assert.equal(c.evidence.scenarios.find((x) => x.scenario === 'Hybrid/internal').unobservable, undefined, name);
+    }
+  });
+
+  it('a missing Portal.User identity still fails even beside an unobservable scenario', () => {
+    const c = checkPortalUser([scen('internal', { owner: cleared() }), scen('external', { user: { present: false, email: null, userName: null } })]);
+    assert.equal(c.pass, false);
+  });
+});
+
+describe('validators (A4): live shapes', () => {
+  const LIVE_OWNER_LABELS = ['Secondary Subscription Owner (FTE)', 'Secondary Subscription Owner Validation Holder', 'Primary Subscription Owner Validation Holder'];
+  const live = (type) => {
+    const s = scen(type);
+    const ids = ['desitsm_secondarysubscriptionowner', 'desitsm_secondarysubscriptionownervalidationholde', 'desitsm_primarysubscriptionownervalidationholder'];
+    s.labels = [...Object.keys(ID).map((k) => ({ id: ID[k], label: CANON[k] })), ...ids.map((id, i) => ({ id, label: LIVE_OWNER_LABELS[i] })), { id: 'desitsm_estimatedmonthlyspend', label: null }];
+    s.validators.push(
+      { control: ids[0], message: 'Secondary Subscription Owner (FTE) exceeds the maximum length of 200 characters.', enabled: true },
+      { control: ids[1], message: 'Secondary Subscription Owner Validation Holder exceeds the maximum length of 100 characters.', enabled: true },
+      { control: 'desitsm_estimatedmonthlyspend', message: 'Monthly Allowance must have a value between -922,337,203,685,477.0000 and 922,337,203,685,477.0000.', enabled: true },
+    );
+    return s;
+  };
+
+  it('longer owner labels on their own controls do not void the owner proof, and the allowance carrier counts as the select', () => {
+    const c = checkValidators([live('internal'), live('external')]);
+    assert.equal(c.pass, true, c.detail);
+    assert.equal(c.evidence.slots.owner.proof.ok, true);
+    assert.equal(c.evidence.slots.allowance.proof.ok, true);
+    assert.deepEqual(c.evidence.slots.allowance.controls.sort(), ['desitsm_estimatedmonthlyspend', ID.allowance].sort());
+  });
+
+  it('the carrier alias is only for the allowance pair: a Monthly Allowance validator on another control still fails', () => {
+    const s = live('internal');
+    s.validators.push({ control: ID.timezone, message: 'Monthly Allowance must be set.', enabled: true });
+    const c = checkValidators([s, live('external')]);
+    assert.equal(c.evidence.slots.allowance.pass, false);
+  });
+
+  it('a compound message naming "Subscription Owner" on its own still voids the owner proof', () => {
+    const s = live('internal');
+    s.validators.push({ control: ID.title, message: 'Subscription Owner and Title must differ.', enabled: true });
+    const c = checkValidators([s, live('external')]);
+    assert.equal(c.evidence.slots.owner.pass, false);
+    assert.equal(c.evidence.slots.owner.proof.ok, false);
+  });
+});
+
 describe('allowance_labels (A2)', () => {
   it('passes with every label parsed, a unique maximum and that option selected by default', () => {
     const c = checkAllowance(both());

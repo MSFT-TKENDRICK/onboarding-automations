@@ -56,6 +56,8 @@ describe('verify against the mock portal', { skip, concurrency: 2, timeout: 6000
     assert.deepEqual(c.field_ids.evidence.slots.timezone, { expectedId: 'desitsm_timezonelist', id: 'desitsm_timezonelist', label: 'Time Zone', canonical: 'Time Zone', tier: 'id', pass: true, scenarios: c.field_ids.evidence.slots.timezone.scenarios });
     assert.equal(c.field_ids.evidence.slots.tenantName.pass, true);
     assert.deepEqual(c.validators.evidence.slots.owner.controls, ['desitsm_subscriptionowner']);
+    assert.deepEqual(c.validators.evidence.slots.allowance.controls.sort(), ['desitsm_estimatedmonthlyspend', 'desitsm_monthlyspend'], 'live: Required on the select, Range on the carrier');
+    assert.equal(c.validators.evidence.slots.allowance.proof.ok, true);
     assert.equal(c.timezone_default.evidence.scenarios[0].matched.value, 'tz-pst');
     assert.equal(c.timezone_default.evidence.scenarios[0].source, 'MCAPS_TIMEZONE');
     assert.equal(c.writes_blocked.evidence.portalAllowedOutsideSignIn, 0);
@@ -101,6 +103,33 @@ describe('verify against the mock portal', { skip, concurrency: 2, timeout: 6000
     assert.equal(c.evidence.used, 'userName');
     assert.equal(c.evidence.email, null);
   })));
+
+  it('A1 (live F1): active_request naming the user clears the owner in one type: unobservable there, pass on the other', () => withMock({ activeOwnersByType: { 444350000: [DEFAULTS.me.upn] } }, async ({ m, verify }) => {
+    const r = await verify('--purpose', 'Hybrid');
+    const c = byId(r.out).portal_user;
+    assert.equal(c.pass, true, c.detail);
+    const rows = Object.fromEntries(c.evidence.scenarios.map((x) => [x.scenario.split('/').pop(), x]));
+    assert.equal(rows.internal.unobservable, 'active_request');
+    assert.equal(rows.internal.pass, null);
+    assert.equal(rows.external.pass, true);
+    assert.equal(rows.external.unobservable, undefined);
+    assert.match(c.detail, /unobservable/);
+    assert.ok(r.out.scenarios.find((x) => x.name.endsWith('/internal')).blockers.includes('active_request'), 'the rule stays a blocker for the scenario');
+    assert.equal(nonSignInWrites(m).length, 0);
+  }).then(() => withMock({ activeOwnersByType: { 444350000: [DEFAULTS.me.upn], 444350001: [DEFAULTS.me.upn] } }, async ({ verify }) => {
+    const c = byId((await verify('--purpose', 'Hybrid')).out).portal_user;
+    assert.equal(c.pass, null, c.detail);
+    assert.ok(c.evidence.scenarios.every((x) => x.unobservable === 'active_request'));
+  })));
+
+  it('A1: the owner blocker does not make a plan ready (active_request stays a blocker outside verify)', () => withMock({ activeOwnersByType: { 444350000: [DEFAULTS.me.upn] } }, async ({ m, home }) => {
+    const env = { ...process.env, MCAPS_PORTAL_URL: m.formUrl, MCAPS_SKILL_HOME: home, MCAPS_LOG_FILE: join(home, 'run.log'), MCAPS_EPHEMERAL: '1', MCAPS_TIMEZONE: 'America/Los_Angeles' };
+    delete env.MCAPS_PROFILE_DIR;
+    const p = await run(['plan', '--purpose', 'Hybrid', '--type', 'internal'], { env });
+    assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));
+    assert.ok(p.out.blockers.some((b) => b.code === 'active_request'));
+    assert.equal(p.out.planId, undefined);
+  }));
 
   it('A2: an unparsable allowance label fails; so does a tied maximum', () => withMock({ monthly: ['500', '1000', ['9999', 'Unlimited']] }, async ({ verify }) => {
     const c = byId((await verify(...SCOPED)).out).allowance_labels;
