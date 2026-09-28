@@ -339,6 +339,8 @@ export function formBinding(ids) {
   for (const id of ids) {
     let el = document.getElementById(id);
     if (el && !['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) el = null;
+    // An id carried by more than one element: which one posts is ambiguous, so nothing is attested for it.
+    if (el && document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length !== 1) continue;
     if (!el && form) {
       const group = [...form.querySelectorAll('input[type=radio]')].filter((r) => r.id.startsWith(`${id}_`) && /^\d+$/.test(r.id.slice(id.length + 1)));
       if (!group.length || new Set(group.map((r) => r.name)).size !== 1) continue;

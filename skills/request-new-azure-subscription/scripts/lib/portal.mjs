@@ -2,7 +2,7 @@
 import { pageSession } from './cdp.mjs';
 import { launchBrowser } from './browser.mjs';
 import { createGuard, isInfraName, READ } from './guard.mjs';
-import { resolveSlot, fingerprint, isChoiceField, validateMap, CANON } from './resolve.mjs';
+import { resolveSlot, fingerprint, isChoiceField, validateMap, CANON, CARRIERS, attestBinding } from './resolve.mjs';
 import { matchOption, matchOwner, ownerSearchTerm, normalize } from './match.mjs';
 import { redactor } from './systemone.mjs';
 import { INTENT_SLOTS, optionCriteria, decideIntent } from './intent.mjs';
@@ -33,7 +33,7 @@ const TYPE_ALIASES = { internal: 'Internal', external: 'External' };
 export const SLOT_ID = { title: F.title, purpose: F.purpose, type: F.type, owner: F.owner, allowance: F.allowance, timezone: F.timezone, tenantType: F.tenantType, tenantLicensing: F.tenantLicensing, tenantName: F.tenantName };
 const TERMS_BOX = 'desitsm_agreetothetermsandconditions';
 // Portal-populated companions: always id-bound, never a --map target or a --field.
-const ID_BOUND = new Set([F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, TERMS_BOX, `${TERMS_BOX}One`]);
+const ID_BOUND = new Set([F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, TERMS_BOX, `${TERMS_BOX}One`, ...Object.values(CARRIERS).map((x) => x.id)]);
 // Dependents the selected type is expected to show: if one of these is gone, that is drift, not "does not apply".
 export const APPLIES = { internal: ['allowance', 'timezone'], external: ['tenantType', 'tenantLicensing', 'tenantName'] };
 // What each slot means, for System One questions (static text: never user or page data).
@@ -48,7 +48,6 @@ const RANK_MAX = 20;
 const SUGGEST_P = 0.85;
 const SUGGEST_MARGIN = 0.3;
 const round3 = (p) => Math.round(p * 1000) / 1000;
-const crlf = (v) => String(v).replace(/\r?\n|\r/g, '\r\n');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => performance.now();
@@ -435,6 +434,12 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     bindings[key] = r.ok ? { ok: true, tier: r.via, id: r.id } : { ok: false, tier: r.code, id: r.id ?? null };
     if (r.ok) {
       fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field), ...(r.via === 'validator' ? { proof: sha256(stableStringify({ id: r.id, message: r.evidence.message })) } : {}) };
+      // The declared carrier of this exact control: pinned by {id, name} so the plan hash and the submit gate cover it.
+      const car = CARRIERS[key];
+      if (car && r.id === car.of) {
+        const cb = await call(P.formBinding, [car.id]);
+        fieldMap[key].carrier = cb.length === 1 ? { id: car.id, name: cb[0][0] } : null;
+      }
       claimed.add(r.id);
       if (r.via !== 'id') out.warnings.push({ code: 'field_remapped', field: key, expectedId: SLOT_ID[key], id: r.id, label: r.field.label, via: r.via, ...(r.via === 'validator' ? { evidence: { message: r.evidence.message.slice(0, 300) } } : {}) });
       return r.id;
@@ -665,13 +670,13 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     const serialized = ser.ok ? ser.pairs : [];
     if (ser.files) out.blockers.push({ code: 'form_drift', reason: 'file_input', message: 'The form carries a file upload; this skill never uploads files.' });
     const attest = [
-      ...Object.entries(fieldMap).filter(([k]) => out.resolved[k]).map(([k, m]) => ({ field: k, id: m.id, name: m.name, value: k === 'owner' ? undefined : out.resolved[k].value })),
-      ...Object.keys(input.fields ?? {}).filter((id) => out.resolved[`fields.${id}`]).map((id) => ({ field: `fields.${id}`, id, name: fields[id]?.name, value: out.resolved[`fields.${id}`].value })),
+      ...Object.entries(fieldMap).filter(([k]) => out.resolved[k]).map(([k, m]) => ({ field: k, m, value: k === 'owner' ? undefined : out.resolved[k].value })),
+      ...Object.keys(input.fields ?? {}).filter((id) => out.resolved[`fields.${id}`]).map((id) => ({ field: `fields.${id}`, m: { id, name: fields[id]?.name }, value: out.resolved[`fields.${id}`].value })),
     ];
     for (const a of attest) {
-      const b = await call(P.formBinding, [a.id]);
-      const reason = b.length !== 1 || b[0][0] !== a.name || serialized.filter(([n]) => n === a.name).length !== 1 ? 'unbound' : a.value !== undefined && b[0][1] !== crlf(a.value) ? 'value_changed' : null;
-      if (reason) out.blockers.push({ code: 'form_drift', field: a.field, id: a.id, reason, message: `The ${a.field} control does not post the value that was set (${reason}).` });
+      const bound = { control: await call(P.formBinding, [a.m.id]), carrier: a.m.carrier ? await call(P.formBinding, [a.m.carrier.id]) : [] };
+      const reason = attestBinding(a.m, a.value, bound, serialized);
+      if (reason) out.blockers.push({ code: 'form_drift', field: a.field, id: a.m.id, reason, message: `The ${a.field} control does not post the value that was set (${reason}).` });
     }
     for (const id of Object.keys(input.fields ?? {})) {
       const slot = Object.keys(fieldMap).find((k) => fieldMap[k].id === id);
@@ -741,7 +746,7 @@ function diffMaterial(a, b, prefix = '') {
 const DAY = 24 * 3600 * 1000;
 const titleMatches = (name, title) => normalize(name).endsWith(` - ${normalize(title)}`);
 // Every field whose posted value must be exactly what fill() verified against the plan (resolved ids included).
-const bindIds = (input, fieldMap = {}) => [...new Set([F.title, F.purpose, F.type, F.owner, F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, ...DEPENDENT.map((d) => d[1]), ...Object.keys(input.fields ?? {}), ...Object.values(fieldMap).map((m) => m.id)])];
+const bindIds = (input, fieldMap = {}) => [...new Set([F.title, F.purpose, F.type, F.owner, F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, ...DEPENDENT.map((d) => d[1]), ...Object.keys(input.fields ?? {}), ...Object.values(fieldMap).flatMap((m) => [m.id, ...(m.carrier ? [m.carrier.id] : [])])])];
 const pairsDiff = (a, b) => {
   const A = new Map(a); const B = new Map(b);
   return [...new Set([...A.keys(), ...B.keys()])].filter((k) => A.get(k) !== B.get(k)).map((k) => k.split('$').pop());
@@ -794,8 +799,9 @@ export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeo
     if (!ser?.ok || ser.files) return notSent('form_changed', { message: ser?.files ? 'The form now carries a file upload; nothing was sent.' : 'Could not read the form serialization; nothing was sent.' });
     const unbound = [];
     for (const [slot, m] of Object.entries(r.fieldMap ?? {})) {
-      const b = await s.page.call(P.formBinding, [m.id]);
-      if (b.length !== 1 || b[0][0] !== m.name || ser.pairs.filter(([n]) => n === m.name).length !== 1) unbound.push(slot);
+      // Arm-time re-attestation, carrier included: each poster once, under its pinned name, carrying the planned value.
+      const bound = { control: await s.page.call(P.formBinding, [m.id]), carrier: m.carrier ? await s.page.call(P.formBinding, [m.carrier.id]) : [] };
+      if (attestBinding(m, slot === 'owner' ? undefined : r.resolved[slot]?.value, bound, ser.pairs)) unbound.push(slot);
     }
     const business = ser.pairs.filter(([n]) => !isInfraName(n));
     for (const [n, v] of [...current, ...accepted]) if (!business.some(([bn, bv]) => bn === n && bv === v)) unbound.push(n.split('$').pop());
