@@ -72,6 +72,8 @@ function page(cfg, { error } = {}) {
   ];
   // A second control with the same label and options as `of` (shown together with it).
   if (d.duplicateLabel) { const src = rows.find((r) => r.includes(`id="${d.duplicateLabel.of}"`)); if (src) rows.push(src.replaceAll(d.duplicateLabel.of, d.duplicateLabel.id)); }
+  // drift.dupAllowanceSelect: a second, NAMED element with the unnamed allowance select's id (posts its own value).
+  if (d.dupAllowanceSelect) rows.push(`<tr style="display:none"><td>${sel('desitsm_monthlyspend', [['100000', '$100000']])}</td></tr>`);
   const hidden = [hid('apitil_contact', cfg.me.contactId), hid('apitil_service', SERVICE), hid('itserv_businessmanageruserid'), hid('itserv_businessmanager', cfg.me.upn),
     hid('desitsm_eslabs_projectlevelemailid'), hid('desitsm_aduserguid'), hid('desitsm_treeview'),
     // Live: the allowance <select> is unnamed; this hidden named text input carries (posts) its value.

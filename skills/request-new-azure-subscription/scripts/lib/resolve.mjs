@@ -42,7 +42,8 @@ const crlf = (v) => String(v).replace(/\r?\n|\r/g, '\r\n');
 // bound: {control, carrier} formBinding() pairs of the control and its carrier; serialized: the whole form's pairs.
 // Every poster (the control when pinned with a name, the carrier when pinned) must be exactly one pair under its
 // pinned name, serialized exactly once, carrying `value` (undefined: not checked). An unnamed control must stay
-// unposted. Returns null, 'unbound' or 'value_changed'.
+// unposted, and must be proven a single element (bound.count === 1): formBinding() yields nothing for a duplicated
+// id, which must never read as "posts nothing". Returns null, 'unbound' or 'value_changed'.
 export function attestBinding(m, value, bound, serialized) {
   const posts = [];
   const one = (pairs, name) => {
@@ -50,7 +51,7 @@ export function attestBinding(m, value, bound, serialized) {
     posts.push(pairs[0][1]);
     return true;
   };
-  if (m.name) { if (!one(bound.control, m.name)) return 'unbound'; } else if (bound.control?.length) return 'unbound';
+  if (m.name) { if (!one(bound.control, m.name)) return 'unbound'; } else if (bound.count !== 1 || bound.control?.length) return 'unbound';
   if (m.carrier !== undefined) { if (!m.carrier || !one(bound.carrier, m.carrier.name)) return 'unbound'; }
   if (!posts.length) return 'unbound';
   return value !== undefined && posts.some((p) => p !== crlf(value)) ? 'value_changed' : null;

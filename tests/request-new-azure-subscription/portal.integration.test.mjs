@@ -458,7 +458,7 @@ describe('allowance carrier (live: unnamed select, hidden named carrier input)',
     assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
     assert.equal(sc.m.state.submissions[0].desitsm_estimatedmonthlyspend, '500');
   }));
-  for (const [name, d, reason] of [['missing', { carrier: false }, 'unbound'], ['mismatched', { carrierMismatch: true }, 'value_changed'], ['duplicated by name', { carrierDup: 'name' }, 'unbound'], ['duplicated by id', { carrierDup: 'id' }, 'unbound']]) {
+  for (const [name, d, reason] of [['missing', { carrier: false }, 'unbound'], ['mismatched', { carrierMismatch: true }, 'value_changed'], ['duplicated by name', { carrierDup: 'name' }, 'unbound'], ['duplicated by id', { carrierDup: 'id' }, 'unbound'], ['correct but the select id is duplicated by a named select', { dupAllowanceSelect: true }, 'unbound']]) {
     it(`a ${name} carrier blocks the plan (${reason})`, () => with_({ drift: d }, async (sc) => {
       const p = await plan(sc);
       assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));

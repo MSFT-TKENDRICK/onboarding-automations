@@ -674,7 +674,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
       ...Object.keys(input.fields ?? {}).filter((id) => out.resolved[`fields.${id}`]).map((id) => ({ field: `fields.${id}`, m: { id, name: fields[id]?.name }, value: out.resolved[`fields.${id}`].value })),
     ];
     for (const a of attest) {
-      const bound = { control: await call(P.formBinding, [a.m.id]), carrier: a.m.carrier ? await call(P.formBinding, [a.m.carrier.id]) : [] };
+      const bound = { control: await call(P.formBinding, [a.m.id]), count: (await call(P.controlEvidence, [a.m.id]))[a.m.id]?.count, carrier: a.m.carrier ? await call(P.formBinding, [a.m.carrier.id]) : [] };
       const reason = attestBinding(a.m, a.value, bound, serialized);
       if (reason) out.blockers.push({ code: 'form_drift', field: a.field, id: a.m.id, reason, message: `The ${a.field} control does not post the value that was set (${reason}).` });
     }
@@ -800,7 +800,7 @@ export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeo
     const unbound = [];
     for (const [slot, m] of Object.entries(r.fieldMap ?? {})) {
       // Arm-time re-attestation, carrier included: each poster once, under its pinned name, carrying the planned value.
-      const bound = { control: await s.page.call(P.formBinding, [m.id]), carrier: m.carrier ? await s.page.call(P.formBinding, [m.carrier.id]) : [] };
+      const bound = { control: await s.page.call(P.formBinding, [m.id]), count: (await s.page.call(P.controlEvidence, [m.id]))[m.id]?.count, carrier: m.carrier ? await s.page.call(P.formBinding, [m.carrier.id]) : [] };
       if (attestBinding(m, slot === 'owner' ? undefined : r.resolved[slot]?.value, bound, ser.pairs)) unbound.push(slot);
     }
     const business = ser.pairs.filter(([n]) => !isInfraName(n));

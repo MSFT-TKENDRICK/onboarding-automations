@@ -255,14 +255,23 @@ test('CARRIERS: a static allowlist (allowance select -> hidden estimated-spend c
 });
 
 test('attestBinding: an unnamed select is attested through its pinned carrier posting exactly the selected value', () => {
-  const ok = attestBinding(unnamed, '1500', { control: [], carrier: [[CAR, '1500']] }, [[CAR, '1500']]);
+  const ok = attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500']]);
   assert.equal(ok, null);
-  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [[CAR, '500']] }, [[CAR, '500']]), 'value_changed', 'mirror lagging or wrong');
-  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [] }, []), 'unbound', 'carrier missing/disabled/outside the form');
-  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [[CAR, '1500']] }, [[CAR, '1500'], [CAR, '1500']]), 'unbound', 'carrier name serialized twice');
-  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [[`${CAR}x`, '1500']] }, [[`${CAR}x`, '1500']]), 'unbound', 'carrier renamed since the pin');
-  assert.equal(attestBinding({ ...unnamed, carrier: null }, '1500', { control: [], carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'no carrier pinned at bind');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '500']] }, [[CAR, '500']]), 'value_changed', 'mirror lagging or wrong');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [] }, []), 'unbound', 'carrier missing/disabled/outside the form');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500'], [CAR, '1500']]), 'unbound', 'carrier name serialized twice');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[`${CAR}x`, '1500']] }, [[`${CAR}x`, '1500']]), 'unbound', 'carrier renamed since the pin');
+  assert.equal(attestBinding({ ...unnamed, carrier: null }, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'no carrier pinned at bind');
   assert.equal(attestBinding({ id: 'desitsm_monthlyspend', name: '' }, '1500', { control: [] }, []), 'unbound', 'no carrier declared');
+});
+
+test('attestBinding: an unnamed control must be proven a single element (a duplicate id could post unattested)', () => {
+  const S = `${P}desitsm_monthlyspend`;
+  // formBinding returns [] for a duplicated id; that must never read as "the unnamed select posts nothing".
+  const dup = [[CAR, '1500'], [S, '100000']];
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 2, carrier: [[CAR, '1500']] }, dup), 'unbound', 'duplicated id');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'count not proven');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 0, carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'control gone');
 });
 
 test('attestBinding: an unnamed select that starts posting, or a named select with a carrier, must agree', () => {
