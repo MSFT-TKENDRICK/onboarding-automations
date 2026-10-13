@@ -34,6 +34,7 @@ All portal work goes through one script, `scripts/mcaps-subscription.mjs` (run i
    `node <skill>/scripts/mcaps-subscription.mjs plan --title "…" --purpose "…" --type internal --owner alias@microsoft.com --allowance 500 --timezone "Pacific Time"`.
    Plan fills the live form with writes blocked. It then matches each value to the current option lists, runs the portal's own eligibility checks, derives the manager, reads the current terms and saves a `planId`.
    - `needs_input` / `invalid`: ask the user about each entry in `missing` / `errors`, offering the listed options. Never pick a value yourself beyond the documented defaults.
+   - Form drift: show every `field_remapped` warning with the plan. For a `field_drift` entry, show its `suggested` control and rerun with `--map <field>=<id>` only after the user approves it.
    - `blocked`: report each blocker (for example an existing active request, or an owner without MCAPS access) and stop.
    - Errors: `vpn_required` or `portal_unreachable` means check the corporate network/VPN and rerun. `auth_required` means rerun with `--headed` and let the user finish sign-in in the window; never handle their credentials. `no_eligible_purpose` means report the portal's message.
 3. **Present the plan**

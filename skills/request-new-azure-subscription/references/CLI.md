@@ -29,8 +29,9 @@ Every input is optional. Values not given are defaulted and listed in `defaulted
 | `--timezone` | `MCAPS_TIMEZONE`, else this computer's IANA zone | `Pacific Time`, `America/Los_Angeles`, `UTC-08:00`, … |
 | `--tenant-type`, `--tenant-licensing` | The only option, if exactly one | External subscriptions only. |
 | `--tenant-name` | None | External subscriptions only. |
-| `--field <id>=<value>` | None | Repeatable. For new required fields the portal adds (form drift). |
-| `--json <file\|->` | | The same inputs as JSON (`title`, `purpose`, `type`, `owner`, `allowance`, `timezone`, `tenantType`, `tenantLicensing`, `tenantName`, `fields`). |
+| `--field <id>=<value>` | None | Repeatable. For new required fields the portal adds (form drift). Not for a named input's control (`use_named_input`). |
+| `--map <slot>=<id>` | None | Repeatable. Binds a named input (`title`, `purpose`, `type`, `allowance`, `timezone`, `tenantType`, `tenantLicensing`, `tenantName`) to a renamed or relabeled control. Use only after the user confirms a `field_drift` suggestion. Part of the plan (replayed by `submit`); the control must still be visible, of the right kind, editable and carry the slot's option shape. `owner` and portal-populated fields cannot be mapped. |
+| `--json <file\|->` | | The same inputs as JSON (`title`, `purpose`, `type`, `owner`, `allowance`, `timezone`, `tenantType`, `tenantLicensing`, `tenantName`, `fields`, `map`). |
 | `--no-defaults` | | Apply no defaults. |
 
 ## Common flags
@@ -51,9 +52,9 @@ Every input is optional. Values not given are defaulted and listed in `defaulted
 | `resolved` | Each field's matched `{ label, value }`. |
 | `defaulted` | `[{ field, value, reason }]`: values the user did not give. Show them so the user can override. |
 | `derived` | Values the portal derives, for example `manager`. |
-| `missing` / `errors` | `{ field, message, options?, candidates? }`: ask the user. |
-| `blockers` | Codes include `active_request`, `mcaps_access`, `owner_cleared`, `owner_not_found`, `manager_missing`, `unknown_required_field`, `portal_validation`. |
-| `warnings` | Codes include `possible_duplicate`, `portal_note`, `portal_check_pending`, `input_ignored`. |
+| `missing` / `errors` | `{ field, message, options?, candidates? }`: ask the user. `missing` code `field_drift` (`{ field, expectedId, label?, suggested?: { id, label, evidence }, candidates }`): the control for a named input changed and was not auto-bound. Show `suggested` (when present) and rerun with `--map <field>=<id>` only after the user approves. `errors` code `invalid_mapping` (`{ field, id, reason }`): a `--map` target failed the live checks. |
+| `blockers` | Codes include `active_request`, `mcaps_access`, `owner_cleared`, `owner_not_found`, `manager_missing`, `unknown_required_field`, `portal_validation`, `form_drift` (the owner control changed, which is never auto-healed, or a bound control no longer posts the value that was set). |
+| `warnings` | Codes include `possible_duplicate`, `portal_note`, `portal_check_pending`, `input_ignored`, `field_remapped` (`{ field, expectedId, id, label, via }`: a named input was bound to a different control than expected, `via: renamed` for a pure rename with the exact same label, `via: mapped` for `--map`; show it with the plan). |
 | `terms` | `{ sha, text, links }`. Show `text` to the user; pass `sha` to `submit` only after they accept. |
 | `planId`, `expiresAt`, `next` | Present when `ready`. |
 | `ms`, `phases`, `timings`, `profile` | Performance data; `profile` is `persistent` or `throwaway`. |
@@ -74,13 +75,13 @@ Exit code 0 only means the command worked. A request was created only when `outc
 | `reason` | Meaning |
 |---|---|
 | `plan_no_longer_ready` | Re-verification found missing, invalid or blocked values (`missing`, `errors`, `blockers`). |
-| `plan_mismatch` | The form options or resolved values changed since planning (`changes`). |
+| `plan_mismatch` | The form, the bound controls (`fieldMap`), the set of posted fields (`postNames`) or resolved values changed since planning (`changes`). |
 | `duplicate_check_failed`, `duplicate_active` | The duplicate check failed, or an active request with this title exists (last 24 h). |
 | `terms_ui_failed` | The terms checkbox could not be set. |
 | `validation_failed` | The portal's client-side validation failed (`failures`). |
 | `submit_contract_changed` | The submit button no longer posts back the way the driver expects. |
-| `form_changed` | A verified value changed before submit (`fields`). |
-| `submit_body_mismatch` | The browser tried to POST values other than the verified ones (`fields`, names only); it was blocked. |
+| `form_changed` | A verified value changed before submit, a bound control no longer posts exactly once under its planned name, or a file upload appeared (`fields`). |
+| `submit_body_mismatch` | The browser tried to POST values other than those serialized and verified just before the click, or a field that was not in the form then (`fields`, names only); it was blocked. |
 | `no_post` | The portal's scripts never sent the request. |
 | `not_delivered` | The request never reached the portal (connection failure before the request was sent). |
 | `error` | The driver failed before anything was sent. |
@@ -98,6 +99,7 @@ After any `not_submitted`, a new `submit` of the same plan is allowed.
 | `error` | Meaning |
 |---|---|
 | `bad_args` | Invalid flags. |
+| `invalid_mapping` | A `--map` entry is malformed, names an unknown slot or `owner`, targets a portal-populated field, maps two slots to one control, or takes another slot's control without remapping that slot. |
 | `auth_required` | Silent SSO did not finish. Rerun with `--headed`; the user signs in themselves. |
 | `vpn_required` | The portal's corporate-network check failed. Connect to VPN. |
 | `portal_unreachable` | The portal did not answer (timeout, DNS, refused, proxy). Check the network/VPN and retry; nothing was submitted. |

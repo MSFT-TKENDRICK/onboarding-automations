@@ -1,7 +1,8 @@
 // Portal driver: guarded CDP session + plan / submit / status flows.
 import { pageSession } from './cdp.mjs';
 import { launchBrowser } from './browser.mjs';
-import { createGuard } from './guard.mjs';
+import { createGuard, isInfraName } from './guard.mjs';
+import { resolveSlot, fingerprint, isChoiceField, validateMap } from './resolve.mjs';
 import { matchOption, matchOwner, ownerSearchTerm, normalize } from './match.mjs';
 import { DEFAULT_TYPE, highestAmount, onlyOption, defaultTitle } from './defaults.mjs';
 import { planId as hashPlan, sha256, stableStringify, requestKey, acquireSubmitLock, markSent, recordOutcome, releaseUnsent } from './plan-store.mjs';
@@ -11,7 +12,7 @@ import * as P from './page.mjs';
 // verifies the page is still the form (the VPN check redirects to /VPNRequired/ on failure).
 const BACKGROUND = /\/AzureSubscription\/CheckPortalAccess(\?|$)/i;
 export const DEFAULT_FORM_URL = 'https://mcapsservices.powerappsportals.com/support/eslabs-newazuresubscription/?ServiceId=78b2e66c-42f2-e811-a96a-000d3a30da4f';
-export const PLAN_SCHEMA = 1;
+export const PLAN_SCHEMA = 2;
 // Page.navigate resolves at commit; the live form commits in ~1.5 s even through the SSO redirects.
 const NAV_TIMEOUT_MS = 25000;
 
@@ -26,6 +27,14 @@ const DEPENDENT = [['allowance', F.allowance, 'money'], ['timezone', F.timezone,
 const AUTO_FIELDS = new Set([F.requester, F.manager, F.owner]);
 const KNOWN = new Set([F.title, F.purpose, F.type, F.owner, ...DEPENDENT.map((d) => d[1]), F.requester, F.manager]);
 const TYPE_ALIASES = { internal: 'Internal', external: 'External' };
+// Logical input (slot) -> the control id it has on the live form today. Resolved per stage (lib/resolve.mjs).
+const SLOT_ID = { title: F.title, purpose: F.purpose, type: F.type, owner: F.owner, allowance: F.allowance, timezone: F.timezone, tenantType: F.tenantType, tenantLicensing: F.tenantLicensing, tenantName: F.tenantName };
+const TERMS_BOX = 'desitsm_agreetothetermsandconditions';
+// Portal-populated companions: always id-bound, never a --map target or a --field.
+const ID_BOUND = new Set([F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, TERMS_BOX, `${TERMS_BOX}One`]);
+// Dependents the selected type is expected to show: if one of these is gone, that is drift, not "does not apply".
+const APPLIES = { internal: ['allowance', 'timezone'], external: ['tenantType', 'tenantLicensing', 'tenantName'] };
+const crlf = (v) => String(v).replace(/\r?\n|\r/g, '\r\n');
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const now = () => performance.now();
@@ -318,7 +327,15 @@ export function normalizeInput(raw = {}) {
     allowance: pick('allowance', 'monthlyAllowance', 'monthly'), timezone: pick('timezone', 'timeZone', 'tz'),
     tenantType: pick('tenantType'), tenantLicensing: pick('tenantLicensing', 'licensing'), tenantName: pick('tenantName', 'tenantDisplayName'),
     fields: raw.fields && typeof raw.fields === 'object' ? Object.fromEntries(Object.entries(raw.fields).map(([k, v]) => [k, String(v)])) : {},
+    map: validMap(raw.map),
   };
+}
+
+// --map slot=id: part of the effective input (hashed into the plan, replayed at submit).
+function validMap(map) {
+  const m = validateMap(map, { expected: SLOT_ID, reserved: ID_BOUND });
+  if (!m.ok) throw new SkillError('invalid_mapping', `Invalid --map: ${m.errors.join('; ')}`, { errors: m.errors });
+  return m.map;
 }
 
 export async function fill(s, input, opts) {
@@ -338,11 +355,33 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   const lap = (k) => { timings[k] = Math.round(now() - t0); s.log(`fill ${k} ${timings[k]}ms`); };
   const out = { resolved: {}, derived: {}, defaulted: [], missing: [], errors: [], blockers: [], warnings: [], options: {}, eligibility: null, validation: null };
   // The effective input: what the user gave plus every applied default, made explicit so submit replays it exactly.
-  const eff = { ...input, fields: { ...(input.fields ?? {}) } };
+  const eff = { ...input, fields: { ...(input.fields ?? {}) }, map: { ...(input.map ?? {}) } };
   const call = (fn, ...a) => s.page.call(fn, ...a);
   const drainModals = async () => { classifyModals(await call(P.takeModals), out); await call(P.hideModals); };
   let fields = byId(await call(P.snapshotFields));
   const refresh = async () => { fields = byId(await call(P.snapshotFields)); };
+  // Resolution state: slot -> {id, name, fp} of the control it was bound to; ids no other slot may take.
+  const fieldMap = {};
+  const claimed = new Set();
+  const unresolved = [];
+
+  // Bind a slot against the current snapshot. Returns the id, undefined when the slot is not shown, or null when
+  // the failure was already reported (field_drift in missing, invalid_mapping in errors, form_drift for owner).
+  const bind = (key, { optional = false, applicable = false } = {}) => {
+    const r = resolveSlot(key, SLOT_ID[key], Object.values(fields), { claimed, mapped: input.map?.[key], optional, applicable, given: input[key] !== undefined });
+    if (r.ok) {
+      fieldMap[key] = { id: r.id, name: r.field.name, fp: fingerprint(r.field) };
+      claimed.add(r.id);
+      if (r.via !== 'id') out.warnings.push({ code: 'field_remapped', field: key, expectedId: SLOT_ID[key], id: r.id, label: r.field.label, via: r.via });
+      return r.id;
+    }
+    if (r.code === 'not_shown' || (r.code === 'invalid_mapping' && r.reason === 'hidden' && optional && !applicable)) return undefined;
+    unresolved.push(r);
+    if (r.code === 'invalid_mapping') out.errors.push({ code: 'invalid_mapping', field: key, id: r.id, reason: r.reason, message: `--map ${key}=${r.id} cannot be used (${r.reason}).` });
+    else if (key === 'owner') out.blockers.push({ code: 'form_drift', field: 'owner', expectedId: r.expectedId, message: 'The subscription owner control changed on the portal; the driver will not guess it. Update the skill.' });
+    else out.missing.push({ field: key, code: 'field_drift', expectedId: r.expectedId, ...(r.label !== undefined ? { label: r.label } : {}), ...(r.suggested ? { suggested: r.suggested } : {}), candidates: r.candidates, message: `The ${key} control changed on the portal.${r.suggested ? ` Likely ${r.suggested.id} ("${r.suggested.label}"): confirm with the user, then rerun with --map ${key}=${r.suggested.id}.` : ' Ask the user which field it is and rerun with --map.'}` });
+    return null;
+  };
 
   const defaultFor = (key, f) => {
     if (!defaults) return null;
@@ -351,13 +390,13 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
       if (['tenantType', 'tenantLicensing', 'tenantName'].some((k) => input[k] !== undefined)) return null;
       return { value: DEFAULT_TYPE, reason: 'Internal subscription unless the user asks for external' };
     }
-    if (key === 'allowance') { const o = f.tag === 'select' && highestAmount(f.options); return o ? { value: o.value, reason: 'Highest monthly allowance offered' } : null; }
+    if (key === 'allowance') { const o = isChoiceField(f) && highestAmount(f.options); return o ? { value: o.value, reason: 'Highest monthly allowance offered' } : null; }
     if (key === 'timezone') return timeZone ? { value: timeZone, reason: `This computer's time zone (${timeZone})` } : null;
     if (key === 'title') { const t = defaultTitle(out.resolved.owner?.upn); return t ? { value: t, reason: "Owner alias and today's date" } : null; }
-    if (['purpose', 'tenantType', 'tenantLicensing'].includes(key) && f.tag === 'select') { const o = onlyOption(f.options); return o ? { value: o.value, reason: 'The only option offered' } : null; }
+    if (['purpose', 'tenantType', 'tenantLicensing'].includes(key) && isChoiceField(f)) { const o = onlyOption(f.options); return o ? { value: o.value, reason: 'The only option offered' } : null; }
     return null;
   };
-  const missingEntry = (key, id, f) => ({ field: key, id, label: f.label, ...(f.tag === 'select' ? { options: optionsOf(f) } : {}) });
+  const missingEntry = (key, id, f) => ({ field: key, id, label: f.label, ...(isChoiceField(f) ? { options: optionsOf(f) } : {}) });
 
   const choose = async (key, id, kind, given = input[key]) => {
     const f = fields[id];
@@ -365,13 +404,14 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
       if (given !== undefined) out.errors.push({ code: 'field_unavailable', field: key, id, message: `${key} is not shown on the form for the current selections.` });
       return false;
     }
-    if (f.tag === 'select') out.options[key] = optionsOf(f);
+    const choice = isChoiceField(f);
+    if (choice) out.options[key] = optionsOf(f);
     const dflt = given === undefined ? defaultFor(key, f) : null;
     const wanted = given ?? dflt?.value;
     if (wanted === undefined) { out.missing.push(missingEntry(key, id, f)); return false; }
     let value = wanted;
     let label = wanted;
-    if (f.tag === 'select') {
+    if (choice) {
       const m = matchOption(f.options, key === 'type' ? (TYPE_ALIASES[normalize(wanted)] ?? wanted) : wanted, { kind });
       // A default that does not map to exactly one option is simply not applied: ask the user instead.
       if (!m.ok && dflt) { out.missing.push(missingEntry(key, id, f)); return false; }
@@ -382,13 +422,14 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     }
     const r = await call(P.setField, id, value);
     if (!r.ok) { out.errors.push({ code: 'set_failed', field: key, id, wanted, detail: r.error ?? `value became ${JSON.stringify(r.value)}` }); return false; }
-    out.resolved[key] = f.tag === 'select' ? { value, label } : { value };
+    out.resolved[key] = choice ? { value, label } : { value };
     if (dflt) { eff[key] = value; out.defaulted.push({ field: key, value: label, reason: dflt.reason }); }
     return true;
   };
 
   // 1) purpose (drives visibility of everything else)
-  if (!(await choose('purpose', F.purpose))) {
+  const purposeId = bind('purpose');
+  if (purposeId === null || !(await choose('purpose', purposeId ?? F.purpose))) {
     if (!defaults) for (const k of ['title', 'type', 'owner']) if (input[k] === undefined) out.missing.push({ field: k });
     return finish();
   }
@@ -397,11 +438,14 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   await refresh();
 
   // 2) owner BEFORE type: the portal only runs owner eligibility on type change. Default: the signed-in user.
+  // Owner is never healed or remapped (its hidden companions are id-bound): only the expected id is accepted.
   let ownerWanted = input.owner;
   const ownerDefault = ownerWanted === undefined && defaults ? (await s.state())?.userEmail ?? null : null;
   if (ownerDefault) ownerWanted = ownerDefault;
   const ownerErrors = out.errors.length;
-  if (ownerWanted === undefined) out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label });
+  const ownerId = bind('owner');
+  if (ownerId === null) { /* form_drift blocker already reported */ }
+  else if (ownerWanted === undefined) out.missing.push({ field: 'owner', id: F.owner, label: fields[F.owner]?.label });
   else if (!fields[F.owner]?.visible) out.errors.push({ code: 'field_unavailable', field: 'owner', id: F.owner });
   else {
     let term;
@@ -432,21 +476,29 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
   await refresh();
 
   // 3) type (runs the portal's eligibility checks against the now-bound owner)
-  if (await choose('type', F.type)) { await s.quiet(); lap('type'); }
+  const typeId = bind('type');
+  if (typeId !== null && await choose('type', typeId ?? F.type)) { await s.quiet(); lap('type'); }
   await drainModals();
   await refresh();
 
-  // 4) type-dependent fields, then user-provided extra fields
-  for (const [key, id, kind] of DEPENDENT) {
-    if (!fields[id]?.visible) { if (input[key] !== undefined) out.warnings.push({ code: 'input_ignored', field: key, message: `${key} does not apply to the selected subscription type.` }); continue; }
+  // 4) type-dependent fields (only those the selected type shows), then user-provided extra fields
+  const typeLabel = normalize(out.resolved.type?.label ?? '');
+  const applies = new Set(/internal/.test(typeLabel) ? APPLIES.internal : /external/.test(typeLabel) ? APPLIES.external : []);
+  for (const [key, , kind] of DEPENDENT) {
+    const id = bind(key, { optional: true, applicable: applies.has(key) });
+    if (id === null) continue;
+    if (id === undefined) { if (input[key] !== undefined) out.warnings.push({ code: 'input_ignored', field: key, message: `${key} does not apply to the selected subscription type.` }); continue; }
     if (kind === 'text' && input[key] !== undefined) {
       const max = key === 'tenantName' ? 50 : 256;
       if (input[key].length > max) { out.errors.push({ code: 'too_long', field: key, max }); continue; }
     }
     if (await choose(key, id, kind === 'text' ? undefined : kind)) await s.quiet({ quietMs: 200 });
   }
+  // Named inputs, their resolved or mapped controls and the portal-populated companions are never set via --field.
+  const reserved = new Set([...KNOWN, ...ID_BOUND, ...Object.values(input.map ?? {}), ...claimed]);
   for (const [id, value] of Object.entries(input.fields ?? {})) {
-    if (KNOWN.has(id)) { out.errors.push({ code: 'use_named_input', id, message: `Use the named input for ${id}.` }); continue; }
+    if (reserved.has(id)) { out.errors.push({ code: 'use_named_input', id, message: `Use the named input for ${id}.` }); continue; }
+    claimed.add(id);
     await refresh();
     if (await choose(`fields.${id}`, id, undefined, value)) await s.quiet({ quietMs: 200 });
   }
@@ -455,7 +507,7 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
 
   // 5) title last (some handlers reset text fields)
   if (input.title !== undefined && input.title.length > 256) out.errors.push({ code: 'too_long', field: 'title', max: 256 });
-  else await choose('title', F.title);
+  else { await refresh(); const titleId = bind('title'); if (titleId !== null) await choose('title', titleId ?? F.title); }
 
   // 6) explicit eligibility (fail closed), independent of the portal's event ordering
   const derived = await call(P.readValues, [F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.owner]);
@@ -485,11 +537,32 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     if (bg.timedOut) out.warnings.push({ code: 'portal_check_pending', message: 'A portal access check had not completed; results may change on submit.', pending: bg.pending });
     out.contactId = st?.contactId ?? null;
     if (st?.mcaps && st.mcaps !== 'True') out.blockers.push({ code: 'mcaps_access', message: 'The portal reports you are not eligible (MCAPS access check failed).' });
+    // Re-attest every bound control against what the browser would post now: exactly one pair under the recorded
+    // name, carrying the value that was set (a late handler or a second control with that name is drift).
+    const ser = await call(P.serializeForm);
+    const serialized = ser.ok ? ser.pairs : [];
+    if (ser.files) out.blockers.push({ code: 'form_drift', reason: 'file_input', message: 'The form carries a file upload; this skill never uploads files.' });
+    const attest = [
+      ...Object.entries(fieldMap).filter(([k]) => out.resolved[k]).map(([k, m]) => ({ field: k, id: m.id, name: m.name, value: k === 'owner' ? undefined : out.resolved[k].value })),
+      ...Object.keys(input.fields ?? {}).filter((id) => out.resolved[`fields.${id}`]).map((id) => ({ field: `fields.${id}`, id, name: fields[id]?.name, value: out.resolved[`fields.${id}`].value })),
+    ];
+    for (const a of attest) {
+      const b = await call(P.formBinding, [a.id]);
+      const reason = b.length !== 1 || b[0][0] !== a.name || serialized.filter(([n]) => n === a.name).length !== 1 ? 'unbound' : a.value !== undefined && b[0][1] !== crlf(a.value) ? 'value_changed' : null;
+      if (reason) out.blockers.push({ code: 'form_drift', field: a.field, id: a.id, reason, message: `The ${a.field} control does not post the value that was set (${reason}).` });
+    }
+    for (const id of Object.keys(input.fields ?? {})) {
+      const slot = Object.keys(fieldMap).find((k) => fieldMap[k].id === id);
+      if (slot && !out.errors.some((e) => e.code === 'use_named_input' && e.id === id)) out.errors.push({ code: 'use_named_input', id, field: slot, message: `${id} is the ${slot} field; use the named input.` });
+    }
+    const slotOf = Object.fromEntries(Object.entries(fieldMap).map(([k, m]) => [m.id, k]));
     const known = new Set([...out.missing.map((m) => m.id), ...out.errors.map((e) => e.id)]);
+    for (const u of unresolved) for (const id of [u.expectedId, u.id, u.suggested?.id, ...(u.candidates ?? []).map((c) => c.id)]) if (id) known.add(id);
     for (const f of Object.values(fields)) {
       if (!f.visible || !f.required || f.value || known.has(f.id)) continue;
       if (AUTO_FIELDS.has(f.id)) { if (f.id === F.manager && out.resolved.owner) out.blockers.push({ code: 'manager_missing', message: 'Reporting manager was not populated for the owner.' }); continue; }
-      out.missing.push({ field: KNOWN.has(f.id) ? f.id : `fields.${f.id}`, id: f.id, label: f.label, ...(KNOWN.has(f.id) ? {} : { code: 'unknown_required_field' }), ...(f.options ? { options: optionsOf(f) } : {}) });
+      const named = slotOf[f.id] ?? (KNOWN.has(f.id) ? f.id : null);
+      out.missing.push({ field: named ?? `fields.${f.id}`, id: f.id, label: f.label, ...(named ? {} : { code: 'unknown_required_field' }), ...(f.options ? { options: optionsOf(f) } : {}) });
       known.add(f.id);
     }
     const ready = !out.missing.length && !out.errors.length;
@@ -502,6 +575,10 @@ async function fillForm(s, input, { discover = false, defaults = true, timeZone 
     out.terms = terms.ok ? { sha: sha256(`${terms.text}\n${terms.links.join('\n')}`), text: terms.display, links: terms.links } : { error: terms.error };
     if (!terms.ok && ready) out.blockers.push({ code: 'terms_unavailable', message: 'Could not read the current terms and conditions.' });
     out.contract = sha256(stableStringify(Object.values(fields).filter((f) => f.visible).map((f) => [f.id, f.label, f.required, f.tag]).sort())).slice(0, 16);
+    out.fieldMap = fieldMap;
+    // Names (not values) of every business control that would be posted with a value: a new default-populated field
+    // changes the plan identity.
+    out.postNames = serialized.filter(([n, v]) => v !== '' && !isInfraName(n)).map(([n]) => n).sort();
     out.status = out.blockers.length ? 'blocked' : out.errors.length ? 'invalid' : out.missing.length ? 'needs_input' : 'ready';
     if (discover) out.fields = Object.values(fields).filter((f) => f.visible).map((f) => ({ id: f.id, label: f.label, required: f.required, value: f.value, ...(f.options ? { options: optionsOf(f) } : {}) }));
     out.dialogs = s.dialogs.splice(0);
@@ -516,9 +593,11 @@ export function planMaterial(formUrl, input, r) {
   return {
     v: PLAN_SCHEMA, formUrl,
     actor: r.contactId,
-    input: { title: input.title, fields: input.fields ?? {} },
+    input: { title: input.title, fields: input.fields ?? {}, map: input.map ?? {} },
     resolved: Object.fromEntries(Object.entries(r.resolved).map(([k, v]) => [k, k === 'owner' ? v.upn : v.value])),
     derived: { ownerGuid: r.derived.ownerGuid, ownerUpn: r.derived.ownerUpn, manager: r.derived.manager, managerEmail: r.derived.managerEmail },
+    fieldMap: r.fieldMap ?? {},
+    postNames: r.postNames ?? [],
     terms: r.terms?.sha ?? null,
     contract: r.contract,
   };
@@ -538,9 +617,8 @@ function diffMaterial(a, b, prefix = '') {
 
 const DAY = 24 * 3600 * 1000;
 const titleMatches = (name, title) => normalize(name).endsWith(` - ${normalize(title)}`);
-const TERMS_BOX = 'desitsm_agreetothetermsandconditions';
-// Every field whose posted value must be exactly what fill() verified against the plan.
-const bindIds = (input) => [...new Set([F.title, F.purpose, F.type, F.owner, F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, ...DEPENDENT.map((d) => d[1]), ...Object.keys(input.fields ?? {})])];
+// Every field whose posted value must be exactly what fill() verified against the plan (resolved ids included).
+const bindIds = (input, fieldMap = {}) => [...new Set([F.title, F.purpose, F.type, F.owner, F.ownerGuid, F.ownerUpn, F.manager, F.managerEmail, F.requester, ...DEPENDENT.map((d) => d[1]), ...Object.keys(input.fields ?? {}), ...Object.values(fieldMap).map((m) => m.id)])];
 const pairsDiff = (a, b) => {
   const A = new Map(a); const B = new Map(b);
   return [...new Set([...A.keys(), ...B.keys()])].filter((k) => A.get(k) !== B.get(k)).map((k) => k.split('$').pop());
@@ -563,7 +641,7 @@ export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeo
   const material = planMaterial(s.formUrl, plan.input, r);
   if (hashPlan(material) !== plan.planId) return { outcome: 'not_submitted', reason: 'plan_mismatch', message: 'The form or resolved values changed since planning. Re-run plan and re-confirm.', changes: diffMaterial(plan.material, material) };
   const title = plan.input.title;
-  const ids = bindIds(plan.input);
+  const ids = bindIds(plan.input, r.fieldMap);
   // Snapshot of exactly what the browser will post, taken right after fill() re-verified it against the plan.
   const verified = await s.page.call(P.formBinding, ids);
 
@@ -587,11 +665,24 @@ export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeo
     if (drift.length) return notSent('form_changed', { message: 'Form values changed after verification; nothing was sent. Re-run plan.', fields: drift });
     const accepted = await s.page.call(P.formBinding, [TERMS_BOX]);
     if (!accepted.length) return notSent('terms_ui_failed', { detail: { error: 'terms checkbox not set after acceptance' } });
+    // Everything the browser would post now. Every resolved slot must still be exactly one pair under its planned
+    // name, and every verified pair must be part of it; the gate then pins the whole business serialization.
+    const ser = await s.page.call(P.serializeForm);
+    if (!ser?.ok || ser.files) return notSent('form_changed', { message: ser?.files ? 'The form now carries a file upload; nothing was sent.' : 'Could not read the form serialization; nothing was sent.' });
+    const unbound = [];
+    for (const [slot, m] of Object.entries(r.fieldMap ?? {})) {
+      const b = await s.page.call(P.formBinding, [m.id]);
+      if (b.length !== 1 || b[0][0] !== m.name || ser.pairs.filter(([n]) => n === m.name).length !== 1) unbound.push(slot);
+    }
+    const business = ser.pairs.filter(([n]) => !isInfraName(n));
+    for (const [n, v] of [...current, ...accepted]) if (!business.some(([bn, bv]) => bn === n && bv === v)) unbound.push(n.split('$').pop());
+    if (unbound.length) return notSent('form_changed', { message: 'The form no longer posts the verified fields the planned way; nothing was sent. Re-run plan.', fields: unbound });
 
     const T0 = Date.now();
     s.hooks.onSubmit = () => markSent(lock, { sentAt: new Date().toISOString() });
-    // The gate lets the POST out only if it carries exactly the verified values (owner, type, purpose, ...).
-    s.guard.armSubmit({ mustContain: [btn.name], mustEqual: [...current, ...accepted] });
+    // The gate lets the POST out only if it carries exactly the business values serialized now (owner, type, purpose,
+    // every hidden companion, ...) and no name that was not serialized now.
+    s.guard.armSubmit({ mustContain: [btn.name], mustEqual: business, onlyNames: [...ser.pairs.map(([n]) => n), btn.name] });
     const loaded = s.page.waitFor('Page.loadEventFired', () => true, { timeoutMs: resultTimeoutMs }).then(() => 'loaded', () => 'timeout');
     s.assertGuarded();
     await s.page.call(P.clickInsert);
