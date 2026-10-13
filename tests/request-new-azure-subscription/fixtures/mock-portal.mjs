@@ -36,6 +36,8 @@ export const DEFAULTS = {
   apiFailAfterPost: false, // the Web API errors once a form POST has been received
   apiDelayMs: 80,
   termsText: 'You acknowledge that: access is monitored. Microsoft prohibits customer data in non-production subscriptions. I agree to the Terms and Conditions.',
+  // undefined: the signed-in user; null: Portal exposes no User; an object: exactly that User.
+  portalUser: undefined,
   drift: {},
 };
 
@@ -46,8 +48,9 @@ function page(cfg, { error } = {}) {
   const d = cfg.drift;
   const honeypot = `frm_pref_${randomUUID().slice(0, 8)}`;
   const row = (id, label, control, hidden = true) => `<tr${hidden ? ' style="display:none"' : ''}><td class="clearfix cell"><div class="info"><label id="${id}_label" for="${id}">${d.relabel?.[id] ?? label}</label></div><div class="control">${control}</div></td></tr>`;
-  const sel = (id, opts) => `<select id="${id}" name="${P}${id}" class="form-control">${opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
+  const sel = (id, opts, name = `${P}${id}`) => `<select id="${id}" name="${name}" class="form-control">${opts.map(([v, t]) => `<option value="${v}">${t}</option>`).join('')}</select>`;
   const txt = (id, extra = '') => `<input type="text" id="${id}" name="${P}${id}" class="text form-control" ${extra}/>`;
+  const carrier = (id) => `<input type="text" id="${id}" name="${P}desitsm_estimatedmonthlyspend" style="display:none"/>`;
   const hid = (id, v = '') => `<input type="hidden" id="${id}" name="${P}${id}" value="${v}"/>`;
   const rows = [
     row('apitil_title', 'Title', txt('apitil_title', 'maxlength="256"'), false),
@@ -59,15 +62,24 @@ function page(cfg, { error } = {}) {
     row('desitsm_subscriptionowner', 'Subscription Owner', txt('desitsm_subscriptionowner', 'autocomplete="off"')),
     row('desitsm_eslabs_projectlevel', 'Reporting Manager', txt('desitsm_eslabs_projectlevel', 'readonly')),
     row('desitsm_tenantdisplayname', 'Tenant Display Name', txt('desitsm_tenantdisplayname', 'maxlength="50"')),
-    cfg.drift.removeField === 'desitsm_monthlyspend' ? '' : row('desitsm_monthlyspend', 'Monthly Allowance', sel('desitsm_monthlyspend', [['', ''], ...cfg.monthly.map((m) => [m, `$${m}`])])),
+    cfg.drift.removeField === 'desitsm_monthlyspend' ? '' : row('desitsm_monthlyspend', 'Monthly Allowance', sel('desitsm_monthlyspend', [['', ''], ...cfg.monthly.map((m) => (Array.isArray(m) ? m : [m, `$${m}`]))], d.namedAllowance ? `${P}desitsm_monthlyspend` : '')),
     cfg.drift.removeField === 'desitsm_timezonelist' ? '' : row('desitsm_timezonelist', 'Time Zone', sel('desitsm_timezonelist', [['', 'Select'], ...cfg.timezones])),
+    row('desitsm_secondarysubscriptionowner', 'Secondary Subscription Owner (FTE)', txt('desitsm_secondarysubscriptionowner', 'maxlength="200"')),
+    row('desitsm_secondarysubscriptionownervalidationholde', 'Secondary Subscription Owner Validation Holder', txt('desitsm_secondarysubscriptionownervalidationholde', 'maxlength="100"')),
+    row('desitsm_primarysubscriptionownervalidationholder', 'Primary Subscription Owner Validation Holder', txt('desitsm_primarysubscriptionownervalidationholder', 'maxlength="100"')),
     cfg.drift.extraRequired ? row(cfg.drift.extraRequired.id, cfg.drift.extraRequired.label, sel(cfg.drift.extraRequired.id, [['', 'Select'], ['1', 'Yes'], ['2', 'No']])) : '',
     row(honeypot, 'Leave this field blank', `<input type="text" id="${honeypot}" name="${honeypot}"/>`, false),
   ];
   // A second control with the same label and options as `of` (shown together with it).
   if (d.duplicateLabel) { const src = rows.find((r) => r.includes(`id="${d.duplicateLabel.of}"`)); if (src) rows.push(src.replaceAll(d.duplicateLabel.of, d.duplicateLabel.id)); }
+  // drift.dupAllowanceSelect: a second, NAMED element with the unnamed allowance select's id (posts its own value).
+  if (d.dupAllowanceSelect) rows.push(`<tr style="display:none"><td>${sel('desitsm_monthlyspend', [['100000', '$100000']])}</td></tr>`);
   const hidden = [hid('apitil_contact', cfg.me.contactId), hid('apitil_service', SERVICE), hid('itserv_businessmanageruserid'), hid('itserv_businessmanager', cfg.me.upn),
-    hid('desitsm_eslabs_projectlevelemailid'), hid('desitsm_aduserguid'), hid('desitsm_treeview'), hid('desitsm_estimatedmonthlyspend'),
+    hid('desitsm_eslabs_projectlevelemailid'), hid('desitsm_aduserguid'), hid('desitsm_treeview'),
+    // Live: the allowance <select> is unnamed; this hidden named text input carries (posts) its value.
+    // drift.carrier false: absent; drift.carrierDup 'name' | 'id': a second input with the same name (or id and name).
+    ...(d.carrier === false ? [] : [carrier('desitsm_estimatedmonthlyspend')]),
+    ...(d.carrierDup ? [carrier(d.carrierDup === 'id' ? 'desitsm_estimatedmonthlyspend' : 'desitsm_estimatedmonthlyspend2')] : []),
     ...(d.extraPopulated ? [hid(d.extraPopulated.id, d.extraPopulated.value)] : []),
     `<input type="checkbox" id="desitsm_agreetothetermsandconditions" name="${P}desitsm_agreetothetermsandconditions" style="display:none"/>`].join('');
   return renameIds(d, `<!doctype html><html><head><title>Request New Cloud Services - MCAPS Services</title></head><body>
@@ -82,10 +94,12 @@ ${error ? `<div id="ValidationSummaryEntityFormView" class="validation-summary a
 <a href="#" onclick="showTermsAndConditionModal();return false;">Terms and Conditions</a>
 <div class="actions"><input type="button" id="InsertButton" name="${INSERT}" value="Submit" disabled="disabled" onclick="javascript:if(typeof entityFormClientValidate === 'function'){if(entityFormClientValidate()){if(typeof Page_ClientValidate === 'function'){if(Page_ClientValidate('')){this.value = 'Processing...';}}}else{return false;}};WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;${INSERT}&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, true))"/></div>
 </form>
-<script>window.Microsoft = { Dynamic365: { Portal: { User: ${JSON.stringify({ contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn })} } } };</script>
-<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null, validatorLabel: d.validatorLabel ?? null })};</script>
+<script>window.Microsoft = { Dynamic365: { Portal: ${JSON.stringify(portalOf(cfg))} } };</script>
+<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null, validatorLabel: d.validatorLabel ?? null, noValidator: d.noValidator ?? [], validatorControl: d.validatorControl ?? {}, fillWrites: !!d.fillWrites, carrierMismatch: !!d.carrierMismatch, carrierOnAccept: d.carrierOnAccept ?? null })};</script>
 <script src="/mock-portal.js"></script></body></html>`);
 }
+
+const portalOf = (cfg) => (cfg.portalUser === null ? {} : { User: cfg.portalUser ?? { contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn } });
 
 // drift.rename {oldId: newId}: the portal renamed a control (id, name, label-for and every script reference).
 function renameIds(drift, text) {
@@ -120,15 +134,24 @@ let subscriptionPurposeOptions = '';
   var REQUIRED = ['apitil_title', 'desitsm_subscriptionpurposeaz', 'apitil_contact_name', 'desitsm_subscriptiontypes', 'desitsm_subscriptionowner', 'desitsm_eslabs_projectlevel', 'desitsm_monthlyspend', 'desitsm_timezonelist', 'desitsm_tenanttypes', 'desitsm_tenantlicensing', 'desitsm_tenantdisplayname'];
   if (C.extraRequired) REQUIRED.push(C.extraRequired);
   if (C.dup) REQUIRED.push(C.dup.id);
-  // Live shape: a RequiredFieldValidator per control, message naming the label as rendered at load (or, with
-  // drift.validatorLabel, the label the portal's validator still carries after a relabel).
-  window.Page_Validators = REQUIRED.filter(function (id) { return !!$id(id); }).map(function (id) {
-    var label = (C.validatorLabel && C.validatorLabel[id]) || ($id(id + '_label') || {}).textContent || id;
-    return { controltovalidate: id, enabled: true, isvalid: true, errormessage: "<a href='#" + id + "_label' onclick='javascript:scrollToAndFocus(\"" + id + "_label\",\"" + id + "\");return false;' referenceControlId=" + id + ">" + label + " is a required field. </a>", _id: id };
+  // Live shape (2026-09-28): a RequiredFieldValidator per control WITHOUT controltovalidate; its message focuses the
+  // control (setFocusAndScrollPosition) and names the label as rendered at load (or, with drift.validatorLabel, the
+  // label the portal's validator still carries after a relabel). MaximumLength/Range validators carry
+  // controltovalidate; the allowance Range validator sits on the hidden carrier, not the select.
+  // drift.noValidator [ids]: no validators for those controls; drift.validatorControl {id: other}: it focuses another control.
+  var labelOf = function (id) { return (C.validatorLabel && C.validatorLabel[id]) || ($id(id + '_label') || {}).textContent || id; };
+  var has = function (id) { return !!$id(id) && C.noValidator.indexOf(id) < 0; };
+  var ctlMsg = function (id, text) { return "<a href='#" + id + "_label' onclick='javascript:scrollToAndFocus(\"" + id + "_label\",\"" + id + "\");return false;' referenceControlId=" + id + ">" + text + " </a>"; };
+  window.Page_Validators = REQUIRED.filter(has).map(function (id) {
+    return { id: 'RequiredFieldValidator' + (id === 'apitil_contact_name' ? 'apitil_contact' : id), enabled: true, isvalid: true, errormessage: "<a href='#!' onclick='setFocusAndScrollPosition(" + (C.validatorControl[id] || id) + ")'>\n        " + labelOf(id) + " is a required field.</a>", _id: id, _required: true };
   });
+  [['apitil_title', 256], ['desitsm_subscriptionowner', 100], ['desitsm_tenantdisplayname', 50], ['desitsm_secondarysubscriptionowner', 200], ['desitsm_secondarysubscriptionownervalidationholde', 100]].forEach(function (x) {
+    if (has(x[0])) window.Page_Validators.push({ id: 'MaximumLengthValidator' + x[0], controltovalidate: x[0], enabled: true, isvalid: true, errormessage: ctlMsg(x[0], labelOf(x[0]) + ' exceeds the maximum length of ' + x[1] + ' characters.'), _id: x[0] });
+  });
+  if (has('desitsm_monthlyspend') && $id('desitsm_estimatedmonthlyspend')) window.Page_Validators.push({ id: 'RangeValidatordesitsm_estimatedmonthlyspend', controltovalidate: 'desitsm_estimatedmonthlyspend', enabled: true, isvalid: true, errormessage: ctlMsg('desitsm_estimatedmonthlyspend', labelOf('desitsm_monthlyspend') + ' must have a value between -922,337,203,685,477.0000 and 922,337,203,685,477.0000.'), _id: 'desitsm_estimatedmonthlyspend' });
   window.Page_ClientValidate = function () {
     var msgs = [];
-    window.Page_Validators.forEach(function (v) { var e = $id(v._id); v.isvalid = !(e && visible(v._id) && !String(e.value || '').trim()); if (!v.isvalid) msgs.push(v.errormessage); });
+    window.Page_Validators.forEach(function (v) { if (!v._required) return; var e = $id(v._id); v.isvalid = !(e && visible(v._id) && !String(e.value || '').trim()); if (!v.isvalid) msgs.push(v.errormessage); });
     var sum = $id('ValidationSummaryEntityFormView');
     sum.querySelector('ul').innerHTML = msgs.map(function (m) { return '<li>' + m + '</li>'; }).join('');
     sum.style.display = msgs.length ? '' : 'none';
@@ -188,9 +211,19 @@ let subscriptionPurposeOptions = '';
     if (C.extraRequired) show(C.extraRequired, internal);
     if (C.dup) show(C.dup.id, visible(C.dup.of));
     if (external) modal('Note', 'This section is for a dedicated tenant environment with trial licensing.');
+    // drift.fillWrites: page script writes to the portal while the form is filled (every method and transport).
+    if (C.fillWrites) {
+      ['POST', 'PUT', 'PATCH', 'DELETE'].forEach(function (m) { fetch('/_api/mock_write', { method: m, body: 'x' }).catch(function () {}); });
+      var x = new XMLHttpRequest(); x.open('POST', '/_api/mock_write'); x.send('x');
+      if (navigator.sendBeacon) navigator.sendBeacon('/_api/mock_write', 'x');
+    }
     eligibility();
   });
-  if ($id('desitsm_monthlyspend')) $id('desitsm_monthlyspend').addEventListener('change', function () { $id('desitsm_estimatedmonthlyspend').value = this.value; });
+  // Live: the portal mirrors the (unnamed) allowance select into its named carrier(s). drift.carrierMismatch: wrongly.
+  if ($id('desitsm_monthlyspend')) $id('desitsm_monthlyspend').addEventListener('change', function () {
+    var v = C.carrierMismatch ? this.value + '0' : this.value;
+    [].slice.call(document.querySelectorAll('[name$="$desitsm_estimatedmonthlyspend"]')).forEach(function (e) { e.value = v; });
+  });
   var owner = $id('desitsm_subscriptionowner'), timer = null, menu = null;
   owner.addEventListener('input', function () {
     clearTimeout(timer);
@@ -233,6 +266,7 @@ let subscriptionPurposeOptions = '';
   window.checkAgreeCheckBox = function () { var on = $id('desitsm_agreetothetermsandconditionsOne').checked; $id('desitsm_agreetothetermsandconditions').checked = on; acceptBtn.disabled = !on; if (!on) $id('InsertButton').disabled = true; };
   window.showHideSubmitButton = function () {
     var ok = $id('desitsm_agreetothetermsandconditionsOne').checked && window.McapsResponse === 'True';
+    if (C.carrierOnAccept) [].slice.call(document.querySelectorAll('[name$="$desitsm_estimatedmonthlyspend"]')).forEach(function (e) { e.value = C.carrierOnAccept; });
     $id('InsertButton').disabled = !ok; $id('desitsm_agreetothetermsandconditions').checked = ok;
   };
 })();
@@ -249,7 +283,11 @@ export async function startMockPortal(overrides = {}) {
   const html = (res, body, status = 200, headers = {}) => { res.writeHead(status, { 'content-type': 'text/html; charset=utf-8', ...headers }); res.end(body); };
   const authed = (req) => !cfg.auth || /mockauth=1/.test(req.headers.cookie ?? '');
   const userBy = (pred) => cfg.users.find(pred);
-  const activeFor = (guid) => (cfg.activeOwners.includes(userBy((u) => u.guid === guid)?.upn) ? [{ apitil_requestnumber: 'REQ-111111-2026', statuscode: 345550000 }] : []);
+  // activeOwners: upns with an active request of any type; activeOwnersByType {typeValue: [upn]}: of that type only.
+  const activeFor = (guid, type) => {
+    const upn = userBy((u) => u.guid === guid)?.upn;
+    return cfg.activeOwners.includes(upn) || (cfg.activeOwnersByType?.[type] ?? []).includes(upn) ? [{ apitil_requestnumber: 'REQ-111111-2026', statuscode: 345550000 }] : [];
+  };
   const isApi = (p) => /^\/(_api|AdGraph|HeadTrax|AzureSubscription)/.test(p);
 
   const server = http.createServer(async (req, res) => {
@@ -283,14 +321,14 @@ export async function startMockPortal(overrides = {}) {
     if (u.pathname === '/_api/apitil_servicerequests' && req.method === 'GET') {
       const f = u.searchParams.get('$filter') ?? '';
       const owner = f.match(/adx_identity_username eq '([^']+)'/);
-      if (owner) return json(res, { value: activeFor(owner[1]) });
+      if (owner) return json(res, { value: activeFor(owner[1], f.match(/desitsm_subscriptiontypes eq (\d+)/)?.[1]) });
       if (cfg.apiFailAfterPost && state.submissions.length) return json(res, { error: { message: 'service unavailable' } }, 503);
       const contact = f.match(/_apitil_contact_value eq ([0-9a-f-]{36})/);
       const num = f.match(/apitil_requestnumber eq '([^']+)'/);
       const top = Number(u.searchParams.get('$top')) || 5000;
       return json(res, { value: state.records.filter((r) => (!contact || r._apitil_contact_value === contact[1]) && (!num || r.apitil_requestnumber === num[1]) && !(cfg.hideCreated && r._fields)).slice(0, top).map(({ _fields, ...r }) => r) });
     }
-    if (u.pathname === '/' && req.method === 'GET') return html(res, `<html><body><script>window.Microsoft={Dynamic365:{Portal:{User:{contactId:'${cfg.me.contactId}',email:'${cfg.me.upn}',userName:'${cfg.me.upn}'}}}};</script>Home</body></html>`);
+    if (u.pathname === '/' && req.method === 'GET') return html(res, `<html><body><script>window.Microsoft={Dynamic365:{Portal:${JSON.stringify(portalOf(cfg))}}};</script>Home</body></html>`);
     if (u.pathname === FORM_PATH && u.searchParams.get('ServiceId') === SERVICE) {
       if (req.method === 'GET') return html(res, page(cfg));
       if (req.method === 'POST') {

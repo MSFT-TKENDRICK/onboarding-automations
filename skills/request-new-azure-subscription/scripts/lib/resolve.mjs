@@ -7,7 +7,7 @@ import { validatorProof } from './drift.mjs';
 
 export const normLabel = (s) => String(s ?? '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim().replace(/[\s*:]+$/, '').toLowerCase();
 const real = (f) => (f.options ?? []).filter((o) => o.value !== '' && o.value != null);
-const AMOUNT = /^(?:usd|eur|gbp|[$€£])?\s*\d{1,3}(?:,?\d{3})*(?:\.\d+)?\s*(?:usd|eur|gbp)?\s*(?:\/\s*month|per month|monthly)?$/i;
+export const AMOUNT = /^(?:usd|eur|gbp|[$€£])?\s*\d{1,3}(?:,?\d{3})*(?:\.\d+)?\s*(?:usd|eur|gbp)?\s*(?:\/\s*month|per month|monthly)?$/i;
 
 // kind: 'choice' (select or radio group), 'text' (text input or textarea), 'lookup' (people-picker text input).
 // renamable/mappable false: never healed or remapped (owner: its hidden companions are id-bound).
@@ -33,6 +33,29 @@ export const SLOTS = {
 };
 
 export const isChoiceField = (f) => f.tag === 'select' || f.type === 'radio';
+// Declared value carriers (fixed allowlist, never inferred): the live allowance <select> is unnamed and the portal
+// mirrors its value into a hidden named text input, which is what the form posts.
+export const CARRIERS = Object.freeze({ allowance: Object.freeze({ of: 'desitsm_monthlyspend', id: 'desitsm_estimatedmonthlyspend' }) });
+const crlf = (v) => String(v).replace(/\r?\n|\r/g, '\r\n');
+
+// Does a bound control still post what was set? m: fieldMap entry {name, carrier?: {id, name} | null};
+// bound: {control, carrier} formBinding() pairs of the control and its carrier; serialized: the whole form's pairs.
+// Every poster (the control when pinned with a name, the carrier when pinned) must be exactly one pair under its
+// pinned name, serialized exactly once, carrying `value` (undefined: not checked). An unnamed control must stay
+// unposted, and must be proven a single element (bound.count === 1): formBinding() yields nothing for a duplicated
+// id, which must never read as "posts nothing". Returns null, 'unbound' or 'value_changed'.
+export function attestBinding(m, value, bound, serialized) {
+  const posts = [];
+  const one = (pairs, name) => {
+    if (!name || pairs?.length !== 1 || pairs[0][0] !== name || serialized.filter(([n]) => n === name).length !== 1) return false;
+    posts.push(pairs[0][1]);
+    return true;
+  };
+  if (m.name) { if (!one(bound.control, m.name)) return 'unbound'; } else if (bound.count !== 1 || bound.control?.length) return 'unbound';
+  if (m.carrier !== undefined) { if (!m.carrier || !one(bound.carrier, m.carrier.name)) return 'unbound'; }
+  if (!posts.length) return 'unbound';
+  return value !== undefined && posts.some((p) => p !== crlf(value)) ? 'value_changed' : null;
+}
 // The canonical (live) label of every slot: what the portal's own validator messages start with.
 export const CANON = Object.fromEntries(Object.entries(SLOTS).map(([k, s]) => [k, s.labels[0]]));
 export function kindOk(kind, f) {
@@ -109,7 +132,10 @@ export function resolveSlot(key, expectedId, fields, { claimed = new Set(), mapp
   if (!legal.length && !expected && !scored.length) return { ok: false, code: 'field_absent', slot: key, expectedId };
   // Proofs authorize: page validators that name this slot's canonical label for exactly one legal control.
   if (validators && legal.length && spec.renamable !== false && spec.mappable !== false) {
-    const proof = validatorProof(key, validators, new Set(legal.map((f) => f.id)), CANON);
+    const car = CARRIERS[key];
+    const proof = validatorProof(key, validators, new Set(legal.map((f) => f.id)), CANON, {
+      context: fields.map((f) => ({ id: f.id, label: f.label })), aliases: car ? { [car.id]: car.of } : {},
+    });
     if (proof.ok) return { ...hit(byId.get(proof.id), 'validator'), evidence: proof.evidence };
   }
 

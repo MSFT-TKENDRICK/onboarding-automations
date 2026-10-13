@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { SLOTS, resolveSlot, fingerprint, validateMap } from '../../skills/request-new-azure-subscription/scripts/lib/resolve.mjs';
+import { SLOTS, CARRIERS, attestBinding, resolveSlot, fingerprint, validateMap } from '../../skills/request-new-azure-subscription/scripts/lib/resolve.mjs';
 
 const P = 'ctl00$form$';
 const opts = (...pairs) => [{ value: '', label: 'Select' }, ...pairs.map(([value, label]) => ({ value, label }))];
@@ -243,4 +243,73 @@ test('validateMap checks slot names, id syntax, uniqueness and reserved ids befo
   assert.equal(v({ allowance: 'desitsm_timezonelist', timezone: 'desitsm_monthlyspend' }).ok, true);
   assert.equal(v({ timezone: 'desitsm_timezonelist' }).ok, true);
   assert.match(v({ nope: 'x' }).errors[0], /nope/);
+});
+
+// Live shape (2026-09-28): the allowance <select> is unnamed; a hidden named text input carries the value.
+const CAR = `${P}desitsm_estimatedmonthlyspend`;
+const unnamed = { id: 'desitsm_monthlyspend', name: '', carrier: { id: 'desitsm_estimatedmonthlyspend', name: CAR } };
+
+test('CARRIERS: a static allowlist (allowance select -> hidden estimated-spend carrier), nothing else', () => {
+  assert.deepEqual(CARRIERS, { allowance: { of: 'desitsm_monthlyspend', id: 'desitsm_estimatedmonthlyspend' } });
+  assert.ok(Object.isFrozen(CARRIERS) && Object.isFrozen(CARRIERS.allowance));
+});
+
+test('attestBinding: an unnamed select is attested through its pinned carrier posting exactly the selected value', () => {
+  const ok = attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500']]);
+  assert.equal(ok, null);
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '500']] }, [[CAR, '500']]), 'value_changed', 'mirror lagging or wrong');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [] }, []), 'unbound', 'carrier missing/disabled/outside the form');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500'], [CAR, '1500']]), 'unbound', 'carrier name serialized twice');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 1, carrier: [[`${CAR}x`, '1500']] }, [[`${CAR}x`, '1500']]), 'unbound', 'carrier renamed since the pin');
+  assert.equal(attestBinding({ ...unnamed, carrier: null }, '1500', { control: [], count: 1, carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'no carrier pinned at bind');
+  assert.equal(attestBinding({ id: 'desitsm_monthlyspend', name: '' }, '1500', { control: [] }, []), 'unbound', 'no carrier declared');
+});
+
+test('attestBinding: an unnamed control must be proven a single element (a duplicate id could post unattested)', () => {
+  const S = `${P}desitsm_monthlyspend`;
+  // formBinding returns [] for a duplicated id; that must never read as "the unnamed select posts nothing".
+  const dup = [[CAR, '1500'], [S, '100000']];
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 2, carrier: [[CAR, '1500']] }, dup), 'unbound', 'duplicated id');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'count not proven');
+  assert.equal(attestBinding(unnamed, '1500', { control: [], count: 0, carrier: [[CAR, '1500']] }, [[CAR, '1500']]), 'unbound', 'control gone');
+});
+
+test('attestBinding: an unnamed select that starts posting, or a named select with a carrier, must agree', () => {
+  const S = `${P}desitsm_monthlyspend`;
+  assert.equal(attestBinding(unnamed, '1500', { control: [[S, '1500']], carrier: [[CAR, '1500']] }, [[S, '1500'], [CAR, '1500']]), 'unbound', 'select gained a name after the pin');
+  const named = { ...unnamed, name: S };
+  assert.equal(attestBinding(named, '1500', { control: [[S, '1500']], carrier: [[CAR, '1500']] }, [[S, '1500'], [CAR, '1500']]), null);
+  assert.equal(attestBinding(named, '1500', { control: [[S, '1500']], carrier: [[CAR, '500']] }, [[S, '1500'], [CAR, '500']]), 'value_changed', 'both named: both post the value');
+  assert.equal(attestBinding(named, '1500', { control: [[S, '1500']], carrier: [] }, [[S, '1500']]), 'unbound', 'pinned carrier vanished');
+  assert.equal(attestBinding({ id: 'x', name: S }, '1500', { control: [[S, '1500']] }, [[S, '1500']]), null, 'plain slot: unchanged rule');
+  assert.equal(attestBinding({ id: 'x', name: S }, undefined, { control: [[S, 'anything']] }, [[S, 'anything']]), null, 'owner: value not checked');
+  assert.equal(attestBinding({ id: 'x', name: S }, 'a\nb', { control: [[S, 'a\r\nb']] }, [[S, 'a\r\nb']]), null, 'newlines post as CRLF');
+});
+
+test('resolveSlot: the allowance validator proof holds across the select and its declared carrier (live split)', () => {
+  const fields = [
+    sel('desitsm_monthlyspend', 'Cap', MONEY, { name: '' }),
+    txt('desitsm_estimatedmonthlyspend', 'Monthly Allowance', { visible: false }),
+  ];
+  const validators = [
+    { control: 'desitsm_monthlyspend', message: 'Monthly Allowance is a required field.', enabled: true },
+    { control: 'desitsm_estimatedmonthlyspend', message: 'Monthly Allowance must have a value between -922,337,203,685,477.0000 and 922,337,203,685,477.0000.', enabled: true },
+  ];
+  const r = resolveSlot('allowance', 'desitsm_monthlyspend', fields, { validators, reserved: new Set(['desitsm_estimatedmonthlyspend']) });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.via, 'validator');
+  assert.equal(r.id, 'desitsm_monthlyspend');
+  const moved = resolveSlot('allowance', 'desitsm_monthlyspend', [{ ...fields[0], id: 'new_spend' }, fields[1]], { validators: [{ ...validators[0], control: 'new_spend' }, validators[1]], reserved: new Set(['desitsm_estimatedmonthlyspend']) });
+  assert.equal(moved.ok, false, 'the alias only covers the declared pair: a moved select is not proven');
+});
+
+test('resolveSlot: a longer label on another control does not void a proof (live owner-style labels)', () => {
+  const fields = [sel('new_tz', 'Zone', TZ), txt('desitsm_secondtimezonenote', 'Secondary Time Zone Note', { visible: false })];
+  const validators = [
+    { control: 'new_tz', message: 'Time Zone is a required field.', enabled: true },
+    { control: 'desitsm_secondtimezonenote', message: 'Secondary Time Zone Note exceeds the maximum length of 100 characters.', enabled: true },
+  ];
+  const r = resolveSlot('timezone', 'desitsm_timezonelist', fields, { validators });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.id, 'new_tz');
 });

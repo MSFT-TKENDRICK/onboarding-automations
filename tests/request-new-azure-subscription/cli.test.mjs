@@ -12,7 +12,7 @@ describe('--help', () => {
     const r = await run(['--help']);
     assert.equal(r.code, 0);
     assert.equal(r.out.usage, HELP);
-    for (const s of ['plan', 'options', 'submit', 'status']) assert.match(HELP, new RegExp(`mcaps-subscription\\.mjs ${s}\\b`));
+    for (const s of ['plan', 'options', 'submit', 'status', 'verify']) assert.match(HELP, new RegExp(`mcaps-subscription\\.mjs ${s}\\b`));
     for (const g of ['Inputs', 'Submit', 'Status', 'Common', 'Examples', 'Exit codes']) assert.match(HELP, new RegExp(`^${g}`, 'm'));
     for (const d of ['default internal', 'the signed-in user', 'the highest monthly allowance', 'MCAPS_TIMEZONE', '30 minutes']) assert.ok(HELP.includes(d), d);
   });
@@ -33,6 +33,15 @@ describe('next hints on early errors (no browser)', () => {
     const r = await run(['submit']);
     assert.equal(r.out.error, 'bad_args');
     assert.match(r.out.next, /--help/);
+  });
+
+  it('verify takes only --purpose, --type and the common flags', async () => {
+    for (const args of [['--owner', 'x'], ['--allowance', '500'], ['--timezone', 'UTC'], ['--title', 't'], ['--tenant-name', 'n'], ['--field', 'a=b'], ['--map', 'title=x'], ['--json', '-'], ['--no-defaults'], ['--full-terms'], ['--plan', 'p'], ['--accept-terms', 's'], ['--allow-duplicate'], ['--case', 'REQ-123456-2026'], ['--type', 'hybrid'], ['extra']]) {
+      const r = await run(['verify', ...args], { stdinText: () => '{}' });
+      assert.equal(r.code, 1, args.join(' '));
+      assert.equal(r.out.error, 'bad_args', args.join(' '));
+      assert.match(r.out.next, /--help/);
+    }
   });
 
   it('invalid_mapping never suggests guessing a control', async () => {
@@ -56,6 +65,18 @@ describe('next hints on early errors (no browser)', () => {
 
 describe('nextHint', () => {
   const plan = (status, extra = {}) => nextHint('plan', { status, missing: [], errors: [], blockers: [], warnings: [], ...extra });
+
+  it('verify: failing or null checks go to the maintainers; a pass off the live portal proves nothing', () => {
+    const checks = [{ id: 'portal_user', pass: true }, { id: 'field_ids', pass: false }, { id: 'validators', pass: null }];
+    const h = nextHint('verify', { ok: false, checks, portal: { live: true } });
+    assert.match(h, /field_ids/);
+    assert.match(h, /validators/);
+    assert.doesNotMatch(h, /portal_user/);
+    assert.match(h, /maintainers/);
+    assert.match(h, /Nothing was submitted/);
+    assert.match(nextHint('verify', { ok: true, checks: [], portal: { live: false } }), /not the live portal/);
+    assert.equal(nextHint('verify', { ok: true, checks: [], portal: { live: true } }), undefined);
+  });
 
   it('ready plans: show terms, submit only after acceptance, never the sha itself', () => {
     const h = plan('ready', { planId: 'p1', terms: { sha: 'f'.repeat(64) } });

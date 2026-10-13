@@ -7,7 +7,7 @@ import { rm } from 'node:fs/promises';
 import { createServer as createNetServer } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { startMockPortal, DEFAULTS } from './fixtures/mock-portal.mjs';
+import { startMockPortal, DEFAULTS, P as MOCK_P } from './fixtures/mock-portal.mjs';
 import { startFakeSystemOne, answer, keyOf } from './fixtures/fake-systemone.mjs';
 import { run } from '../../skills/request-new-azure-subscription/scripts/mcaps-subscription.mjs';
 import { findBrowser } from '../../skills/request-new-azure-subscription/scripts/lib/browser.mjs';
@@ -111,7 +111,8 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     sc.env.MCAPS_TIMEZONE = 'America/New_York';
     const s = await submit(sc, r);
     assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
-    assert.equal(sc.m.state.submissions[0].desitsm_monthlyspend, '1500');
+    assert.equal(sc.m.state.submissions[0].desitsm_estimatedmonthlyspend, '1500', 'live shape: the carrier posts the allowance');
+    assert.equal(sc.m.state.submissions[0].desitsm_monthlyspend, undefined, 'live shape: the select is unnamed');
     assert.equal(sc.m.state.submissions[0].desitsm_timezonelist, 'tz-pst');
   }));
 
@@ -423,7 +424,7 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
 describe('form drift: resolve renamed/relabeled controls without weakening the POST binding', { skip, concurrency: 2, timeout: 600000 }, () => {
   const remapped = (out, field) => out.warnings.find((w) => w.code === 'field_remapped' && w.field === field);
 
-  it('heals pure renames (timezone, allowance) and posts under the new names', () => with_({ drift: { rename: { desitsm_timezonelist: 'desitsm_tz_v2', desitsm_monthlyspend: 'desitsm_allowance_v2' } } }, async (sc) => {
+  it('heals pure renames (timezone, named allowance) and posts under the new names', () => with_({ drift: { namedAllowance: true, rename: { desitsm_timezonelist: 'desitsm_tz_v2', desitsm_monthlyspend: 'desitsm_allowance_v2' } } }, async (sc) => {
     const p = await plan(sc);
     assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
     assert.deepEqual(remapped(p.out, 'timezone'), { code: 'field_remapped', field: 'timezone', expectedId: 'desitsm_timezonelist', id: 'desitsm_tz_v2', label: 'Time Zone', via: 'renamed' });
@@ -436,6 +437,71 @@ describe('form drift: resolve renamed/relabeled controls without weakening the P
     assert.equal(sub.desitsm_allowance_v2, '500');
     assert.equal(sub.desitsm_timezonelist, undefined);
   }));
+
+  it('a renamed UNNAMED allowance select has no declared carrier: form_drift unbound, never ready', () => with_({ drift: { rename: { desitsm_monthlyspend: 'desitsm_allowance_v2' } } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));
+    assert.ok(p.out.blockers.some((b) => b.code === 'form_drift' && b.field === 'allowance' && b.reason === 'unbound'), JSON.stringify(p.out.blockers));
+    assert.equal(p.out.planId, undefined);
+  }));
+});
+
+describe('allowance carrier (live: unnamed select, hidden named carrier input)', { skip, concurrency: 2, timeout: 600000 }, () => {
+  const drift = (out) => out.blockers.filter((b) => b.code === 'form_drift' && b.field === 'allowance').map((b) => b.reason);
+  it('pins the carrier in the plan, posts the value only through it and re-attests it at submit', () => with_({}, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    const plans = JSON.parse(readFileSync(join(sc.home, 'plans', `${p.out.planId}.json`), 'utf8'));
+    assert.deepEqual(plans.material.fieldMap.allowance.carrier, { id: 'desitsm_estimatedmonthlyspend', name: `${MOCK_P}desitsm_estimatedmonthlyspend` });
+    assert.equal(plans.material.fieldMap.allowance.name, '');
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions[0].desitsm_estimatedmonthlyspend, '500');
+  }));
+  for (const [name, d, reason] of [['missing', { carrier: false }, 'unbound'], ['mismatched', { carrierMismatch: true }, 'value_changed'], ['duplicated by name', { carrierDup: 'name' }, 'unbound'], ['duplicated by id', { carrierDup: 'id' }, 'unbound'], ['correct but the select id is duplicated by a named select', { dupAllowanceSelect: true }, 'unbound']]) {
+    it(`a ${name} carrier blocks the plan (${reason})`, () => with_({ drift: d }, async (sc) => {
+      const p = await plan(sc);
+      assert.equal(p.out.status, 'blocked', JSON.stringify(p.out));
+      assert.deepEqual(drift(p.out), [reason], JSON.stringify(p.out.blockers));
+      assert.equal(p.out.planId, undefined);
+      assert.equal(sc.formPosts(), 0);
+    }));
+  }
+  it('a named select and its carrier must both post the value (legacy named shape stays ready)', () => with_({ drift: { namedAllowance: true } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions[0].desitsm_monthlyspend, '500');
+    assert.equal(sc.m.state.submissions[0].desitsm_estimatedmonthlyspend, '500');
+  }).then(() => with_({ drift: { namedAllowance: true, carrierMismatch: true } }, async (sc) => {
+    const p = await plan(sc);
+    assert.deepEqual(drift(p.out), ['value_changed'], JSON.stringify(p.out.blockers));
+  })));
+  it('a carrier that changes after plan is refused at submit (plan_no_longer_ready), nothing posted', () => with_({}, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    sc.m.state.config.drift = { ...sc.m.state.config.drift, carrierMismatch: true };
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'not_submitted', JSON.stringify(s.out));
+    assert.equal(s.out.reason, 'plan_no_longer_ready', JSON.stringify(s.out));
+    assert.deepEqual(s.out.blockers.map((b) => [b.field, b.reason]), [['allowance', 'value_changed']]);
+    assert.equal(sc.formPosts(), 0);
+  }));
+  it('a carrier changed by page script at terms acceptance is caught by the arm-time recheck, nothing posted', () => with_({ drift: { carrierOnAccept: '999' } }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'not_submitted', JSON.stringify(s.out));
+    assert.equal(s.out.reason, 'form_changed', JSON.stringify(s.out));
+    assert.equal(sc.formPosts(), 0);
+    assert.equal(sc.m.state.submissions.length, 0);
+    assert.equal(sc.formPosts(), 0);
+  }));
+});
+
+describe('form drift (continued)', { skip, concurrency: 2, timeout: 600000 }, () => {
+  const remapped = (out, field) => out.warnings.find((w) => w.code === 'field_remapped' && w.field === field);
 
   it('finds a renamed purpose select by its label (form readiness and resolution)', () => with_({ drift: { rename: { desitsm_subscriptionpurposeaz: 'desitsm_purpose_v2' } } }, async (sc) => {
     const p = await plan(sc);

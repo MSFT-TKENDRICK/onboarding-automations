@@ -68,3 +68,58 @@ describe('validatorProof', () => {
     assert.equal(r.ok, true, JSON.stringify(r));
   });
 });
+
+describe('validatorProof: live page context (F4 longer labels, F5 declared carrier)', () => {
+  const L = { ...LABELS, owner: 'Subscription Owner' };
+  const ctx = [['desitsm_subscriptionowner', 'Subscription Owner'], ['desitsm_secondarysubscriptionowner', 'Secondary Subscription Owner (FTE)'], ['desitsm_secondarysubscriptionownervalidationholde', 'Secondary Subscription Owner Validation Holder'], ['desitsm_primarysubscriptionownervalidationholder', 'Primary Subscription Owner Validation Holder'], ['desitsm_monthlyspend', 'Monthly Allowance']].map(([id, label]) => ({ id, label }));
+  const owner = [
+    v('desitsm_subscriptionowner', 'Subscription Owner is a required field.'),
+    v('desitsm_subscriptionowner', 'Subscription Owner exceeds the maximum length of 100 characters.'),
+    v('desitsm_secondarysubscriptionowner', 'Secondary Subscription Owner (FTE) exceeds the maximum length of 200 characters.'),
+    v('desitsm_secondarysubscriptionownervalidationholde', 'Secondary Subscription Owner Validation Holder exceeds the maximum length of 100 characters.'),
+    v('desitsm_primarysubscriptionownervalidationholder', 'Primary Subscription Owner Validation Holder exceeds the maximum length of 100 characters.'),
+  ];
+  const el = new Set(['desitsm_subscriptionowner', 'desitsm_secondarysubscriptionowner']);
+  it('without page context, longer labels of other controls void the proof (live failure)', () => {
+    assert.equal(validatorProof('owner', owner, el, L).reason, 'multiple_controls');
+  });
+  it('masks mentions that only fall inside a longer on-page label', () => {
+    const r = validatorProof('owner', owner, el, L, { context: ctx });
+    assert.equal(r.ok, true);
+    assert.equal(r.id, 'desitsm_subscriptionowner');
+  });
+  it('a message that still names the slot label on its own is a mention (other control -> void)', () => {
+    const r = validatorProof('owner', [...owner, v('desitsm_secondarysubscriptionowner', 'Secondary Subscription Owner (FTE) must differ from Subscription Owner.')], el, L, { context: ctx });
+    assert.equal(r.reason, 'multiple_controls');
+  });
+  it('a context label that is not on the page as a longer label masks nothing', () => {
+    const r = validatorProof('owner', [...owner, v('x', 'Subscription Owner must be chosen')], el, L, { context: [{ id: 'desitsm_subscriptionowner', label: 'Subscription Owner' }] });
+    assert.equal(r.reason, 'multiple_controls');
+  });
+  it('a longer label that only contains the slot label as a partial word never masks', () => {
+    const r = validatorProof('owner', [...owner.slice(0, 2), v('x', 'Subscription Ownership: Subscription Owner required')], el, L, { context: [{ id: 'x', label: 'Subscription Ownership' }] });
+    assert.equal(r.reason, 'multiple_controls');
+  });
+  it('a longer label is masked only in validators on the control that carries it', () => {
+    const r = validatorProof('owner', [...owner, v('desitsm_other', 'Secondary Subscription Owner (FTE) is invalid')], el, L, { context: ctx });
+    assert.equal(r.reason, 'multiple_controls');
+  });
+  const allowance = [
+    v('desitsm_monthlyspend', 'Monthly Allowance is a required field.'),
+    v('desitsm_estimatedmonthlyspend', 'Monthly Allowance must have a value between -922,337,203,685,477.0000 and 922,337,203,685,477.0000.'),
+  ];
+  const ael = new Set(['desitsm_monthlyspend']);
+  it('the allowance validators split across select and carrier void the proof without the declared alias', () => {
+    assert.equal(validatorProof('allowance', allowance, ael, L).reason, 'multiple_controls');
+  });
+  it('the declared carrier alias treats the carrier as the select for that slot', () => {
+    const r = validatorProof('allowance', allowance, ael, L, { aliases: { desitsm_estimatedmonthlyspend: 'desitsm_monthlyspend' } });
+    assert.equal(r.ok, true);
+    assert.equal(r.id, 'desitsm_monthlyspend');
+  });
+  it('an alias never rescues a third control or a carrier that names another slot', () => {
+    const al = { desitsm_estimatedmonthlyspend: 'desitsm_monthlyspend' };
+    assert.equal(validatorProof('allowance', [...allowance, v('other', 'Monthly Allowance is invalid')], ael, L, { aliases: al }).reason, 'multiple_controls');
+    assert.equal(validatorProof('allowance', [...allowance, v('desitsm_estimatedmonthlyspend', 'Title is a required field.')], ael, L, { aliases: al }).reason, 'shared_control');
+  });
+});

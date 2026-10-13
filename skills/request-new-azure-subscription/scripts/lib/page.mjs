@@ -61,6 +61,30 @@ export function pageState() {
   };
 }
 
+// verify: what Microsoft.Dynamic365.Portal.User exposes (the owner default reads email, else userName). Read-only.
+export function portalUser() {
+  const portal = window.Microsoft?.Dynamic365?.Portal;
+  const u = portal?.User;
+  const str = (v) => (typeof v === 'string' && v.trim() ? v.trim() : null);
+  return { portal: !!portal, object: !!u && typeof u === 'object', email: str(u?.email), userName: str(u?.userName) };
+}
+
+// verify: per control id, how many elements carry it and the label the driver would read for it. `associated` is
+// true only when a label is found and every label pointing at the control (<id>_label, label[for]) reads the same.
+export function controlEvidence(ids) {
+  const txt = (s) => (s || '').replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const out = {};
+  for (const id of ids) {
+    const esc = window.CSS?.escape ? CSS.escape(id) : id;
+    const exact = document.querySelectorAll(`[id="${esc}"]`).length;
+    const count = exact || (document.querySelector(`input[type="radio"][id^="${esc}_"]`) ? 1 : 0);
+    const labels = [...new Set([document.getElementById(`${id}_label`), ...document.querySelectorAll(`label[for="${esc}"]`)].filter(Boolean))];
+    const texts = [...new Set(labels.map((l) => txt(l.textContent)))];
+    out[id] = { count, label: texts[0] ?? null, associated: labels.length > 0 && texts.length === 1 };
+  }
+  return out;
+}
+
 export function clickSignIn() {
   const b = document.querySelector('button[name="provider"]');
   if (!b) return false;
@@ -235,10 +259,21 @@ export function validatorIndex() {
     })
     .replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
   const off = (v) => v.enabled === false || /^(false|0)$/i.test(String(v.enabled ?? '').trim());
+  // Live RequiredFieldValidators carry no controltovalidate; their message focuses the control instead. That id only
+  // counts when it is a real element inside liquid_form (the validator's own id can differ: apitil_contact vs _name).
+  const focused = (v) => {
+    const m = /setFocusAndScrollPosition\(\s*['"]?([\w-]+)/.exec(String(v.errormessage ?? ''));
+    if (!m || typeof document === 'undefined') return null;
+    const el = document.getElementById(m[1]);
+    const form = document.getElementById('liquid_form');
+    return el && form && form !== el && form.contains(el) ? m[1] : null;
+  };
   const out = [];
   for (const v of window.Page_Validators || []) {
-    if (!v || typeof v.controltovalidate !== 'string' || !v.controltovalidate) continue;
-    out.push({ control: v.controltovalidate, message: text(v.errormessage), enabled: !off(v) });
+    if (!v) continue;
+    const control = typeof v.controltovalidate === 'string' && v.controltovalidate ? v.controltovalidate : focused(v);
+    if (!control) continue;
+    out.push({ control, message: text(v.errormessage), enabled: !off(v) });
   }
   return out;
 }
@@ -304,6 +339,8 @@ export function formBinding(ids) {
   for (const id of ids) {
     let el = document.getElementById(id);
     if (el && !['INPUT', 'SELECT', 'TEXTAREA'].includes(el.tagName)) el = null;
+    // An id carried by more than one element: which one posts is ambiguous, so nothing is attested for it.
+    if (el && document.querySelectorAll(`[id="${CSS.escape(id)}"]`).length !== 1) continue;
     if (!el && form) {
       const group = [...form.querySelectorAll('input[type=radio]')].filter((r) => r.id.startsWith(`${id}_`) && /^\d+$/.test(r.id.slice(id.length + 1)));
       if (!group.length || new Set(group.map((r) => r.name)).size !== 1) continue;

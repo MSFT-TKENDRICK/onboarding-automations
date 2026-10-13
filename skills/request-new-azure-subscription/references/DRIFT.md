@@ -15,8 +15,12 @@ In order, for every named input except `owner`:
 
 A validator proof binds a slot only when all of the following hold:
 
-- The slot's canonical label starts the message of enabled validators that name exactly one eligible control.
-- No validator message naming that label also names another slot's label (a compound message).
+- The slot's canonical label starts the message of enabled validators that name exactly one eligible control. A
+  validator's control is its `controltovalidate`, or else the id in its message's `setFocusAndScrollPosition(...)`
+  (live required validators). The allowance carrier `desitsm_estimatedmonthlyspend` counts as its select.
+- No validator message naming that label also names another slot's label (a compound message). A mention that falls
+  entirely inside a longer label on the page does not count (for example "Secondary Subscription Owner (FTE)" for
+  "Subscription Owner").
 - No other slot's label points at the same control.
 - The control is eligible: visible, editable, of the slot's kind and option shape, and not another slot's, a portal-populated field, another `--map` target or a `--fields` id.
 

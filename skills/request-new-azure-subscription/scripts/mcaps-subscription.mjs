@@ -4,11 +4,13 @@
 //   submit  : re-verify a saved plan and submit exactly once (requires --plan and --accept-terms <sha>).
 //   status  : list your recent requests (or one --case) from the portal Web API.
 //   options : show the currently visible fields and option lists for the given selections.
+//   verify  : maintainers: prove the live-portal assumptions read-only (PORTAL.md). Never submits or saves.
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openSession, openForm, fill, submit, ownRequests, findDuplicates, planMaterial, normalizeInput, DEFAULT_FORM_URL, SkillError } from './lib/portal.mjs';
+import { runVerify } from './lib/verify.mjs';
 import { stateDir, savePlan, loadPlan, readLock, requestKey, planId as hashPlan } from './lib/plan-store.mjs';
 import { systemTimeZone } from './lib/defaults.mjs';
 import { killAllBrowsers } from './lib/browser.mjs';
@@ -20,6 +22,9 @@ export const HELP = `Usage:
   node mcaps-subscription.mjs options [inputs] [common]   Show the visible fields and current options. Saves nothing.
   node mcaps-subscription.mjs submit  --plan <planId> --accept-terms <terms.sha> [--allow-duplicate] [common]
   node mcaps-subscription.mjs status  [--case REQ-123456-2026] [common]
+  node mcaps-subscription.mjs verify  [--purpose <text>] [--type internal|external] [common]
+                                                          Maintainers: prove the live-portal assumptions read-only
+                                                          (references/PORTAL.md). Never submits, never saves a plan.
 
 Inputs (plan, options). All optional; applied defaults are listed in "defaulted":
   --title <text>                 default "<owner alias> Azure subscription <YYYY-MM-DD>" (max 256 characters)
@@ -47,6 +52,10 @@ Submit (sends the request once; only after the user explicitly accepted the plan
 Status:
   --case REQ-123456-2026         only this request (default: your 10 most recent requests)
 
+Verify (default: every offered purpose with both types; a narrower run leaves checks unproven):
+  --purpose <text>               only this purpose
+  --type internal|external       only this type
+
 Common:
   --headed                       visible browser so the user can finish sign-in (after auth_required)
   --ephemeral                    throwaway browser profile for this run
@@ -56,8 +65,8 @@ Common:
   -h, --help                     this text
 
 Output: one JSON object on stdout. Follow its "next" hint.
-Exit codes: 0 the command worked (not proof a request exists), 2 needs action or nothing was submitted,
-  3 submit outcome unknown (never resubmit), 1 error.
+Exit codes: 0 the command worked (not proof a request exists), 2 needs action or nothing was submitted
+  (verify: a check failed or could not run), 3 submit outcome unknown (never resubmit), 1 error.
 
 Examples:
   node mcaps-subscription.mjs plan
@@ -131,11 +140,20 @@ export function nextHint(cmd, out) {
     return undefined;
   }
   if (cmd === 'status' && out.found === false) return 'The case is not visible yet: tell the user and check again later. Never resubmit because of it.';
+  if (cmd === 'verify') {
+    if (!out.ok) {
+      const open = (out.checks ?? []).filter((c) => c.pass !== true).map((c) => `${c.id} (${c.pass === null ? 'null: could not run' : 'failed'})`);
+      return `Report ${open.join(', ') || 'the result'} with its evidence and detail to the skill maintainers. Nothing was submitted. A null check did not run: see its detail (a --purpose/--type run leaves the rest unchecked).`;
+    }
+    if (out.portal?.live === false) return 'Every check passed, but against MCAPS_PORTAL_URL, not the live portal: this proves nothing about the live portal.';
+  }
   return undefined;
 }
 
 const EXIT = { ready: 0, success: 0, ok: 0, needs_input: 2, invalid: 2, blocked: 2, not_submitted: 2, rejected: 2, unknown: 3, error: 1 };
 const PLAN_TTL_MS = 30 * 60 * 1000;
+const VERIFY_FLAGS = new Set(['purpose', 'type', 'headed', 'ephemeral', 'browser', 'verbose', 'pretty', 'help']);
+const TYPES = ['internal', 'external'];
 
 function parse(argv) {
   const { values, positionals } = parseArgs({
@@ -204,7 +222,7 @@ async function execute(argv, { env = process.env, stdinText = () => readFileSync
   const { cmd, v } = parsed;
   ctx.cmd = cmd;
   if (v.help || !cmd) return { code: v.help ? 0 : 1, out: { usage: HELP } };
-  if (!['plan', 'submit', 'status', 'options'].includes(cmd)) return { code: 1, out: { ok: false, error: 'bad_args', message: `Unknown command ${cmd}`, usage: HELP } };
+  if (!['plan', 'submit', 'status', 'options', 'verify'].includes(cmd)) return { code: 1, out: { ok: false, error: 'bad_args', message: `Unknown command ${cmd}`, usage: HELP } };
   const formUrl = env.MCAPS_PORTAL_URL || DEFAULT_FORM_URL;
   const dir = stateDir(env);
   const logFile = env.MCAPS_LOG_FILE;
@@ -230,6 +248,11 @@ async function execute(argv, { env = process.env, stdinText = () => readFileSync
       }
     }
     if (cmd === 'status' && v.case && !/^REQ-\d{6}-\d{4}$/.test(v.case)) throw new SkillError('bad_args', 'Case ids look like REQ-123456-2026.');
+    if (cmd === 'verify') {
+      const extra = Object.keys(v).filter((k) => !VERIFY_FLAGS.has(k));
+      if (extra.length || parsed.extra.length) throw new SkillError('bad_args', `verify takes only --purpose, --type and the common flags (got ${[...extra.map((k) => `--${k}`), ...parsed.extra].join(' ')}).`);
+      if (v.type !== undefined && !TYPES.includes(v.type.trim().toLowerCase())) throw new SkillError('bad_args', '--type must be internal or external.');
+    }
   } catch (e) {
     return { code: 1, out: { ok: false, error: e.code ?? 'bad_args', message: e.message } };
   }
@@ -237,7 +260,11 @@ async function execute(argv, { env = process.env, stdinText = () => readFileSync
   const t0 = performance.now();
   let s;
   try {
-    s = await openSession({ formUrl, headless: !v.headed, browserPath: v.browser, profileDir: v.ephemeral || env.MCAPS_EPHEMERAL === '1' ? undefined : (env.MCAPS_PROFILE_DIR || join(dir, 'profile')), traceNet: env.MCAPS_TRACE_NET === '1', log });
+    s = await openSession({ formUrl, headless: !v.headed, browserPath: v.browser, profileDir: v.ephemeral || env.MCAPS_EPHEMERAL === '1' ? undefined : (env.MCAPS_PROFILE_DIR || join(dir, 'profile')), traceNet: env.MCAPS_TRACE_NET === '1', allowSubmit: cmd !== 'verify', log });
+    if (cmd === 'verify') {
+      const res = await runVerify(s, { purpose: v.purpose?.trim() || undefined, type: v.type?.trim().toLowerCase(), env });
+      return { code: res.ok ? 0 : 2, out: { ...res, ms: Math.round(performance.now() - t0) } };
+    }
     if (cmd === 'status') {
       const res = await ownRequests(s, readProfile(dir).contactId, { caseId: v.case });
       saveProfile(dir, { contactId: res.contactId });

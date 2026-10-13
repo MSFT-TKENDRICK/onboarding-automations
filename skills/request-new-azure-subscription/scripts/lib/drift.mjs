@@ -11,32 +11,44 @@ export function validatorLabel(message, label, { anchored = false } = {}) {
   return new RegExp(anchored ? `^\\s*${body}` : `(?<![\\w-])${body}`, 'i').test(String(message ?? ''));
 }
 
-// Labels that occur in the message, dropping any label that only appears inside a longer matched label.
-function labelsIn(message, labels) {
-  const hits = Object.entries(labels).filter(([, l]) => validatorLabel(message, l));
-  return hits.filter(([, l]) => !hits.some(([, o]) => o !== l && o.length > l.length && validatorLabel(o, l)
-    && !validatorLabel(String(message).replace(new RegExp(esc(o).replace(/\s+/g, '\\s+'), 'gi'), ' '), l)))
-    .map(([slot]) => slot);
+const phrase = (l) => new RegExp(`(?<![\\w-])${esc(l).replace(/\s+/g, '\\s+')}(?![\\w-])`, 'gi');
+
+// Labels that occur in the message on their own: occurrences that fall entirely inside a longer label (another slot's,
+// or the longer label of the validator's own control from `extra`) are masked first, longest first.
+function labelsIn(message, labels, extra = []) {
+  const all = [...new Set([...Object.values(labels), ...extra].filter((l) => typeof l === 'string' && l.trim()))];
+  return Object.entries(labels).filter(([, l]) => {
+    let m = String(message ?? '');
+    for (const o of all.filter((o) => o.length > l.length && validatorLabel(o, l)).sort((a, b) => b.length - a.length)) m = m.replace(phrase(o), ' ');
+    return validatorLabel(m, l);
+  }).map(([slot]) => slot);
 }
 
 // validators: [{control, message, enabled?}] from Page_Validators. eligible: Set of control ids.
 // Evidence: enabled validators whose message starts with the slot's label. Every validator that mentions the label,
 // enabled or not, must agree on the control; any compound or shared message voids the proof.
-export function validatorProof(slot, validators, eligible, labels) {
+// context: [{id, label}] of the on-page controls. A validator's own control's (longer) label is masked in its message
+// ("Secondary Subscription Owner (FTE) exceeds ..." on that control is not an owner mention); a longer label in a
+// validator on any other control is never masked. aliases: {carrierId: controlId} for the slot's declared carrier pair
+// only; the carrier's validators count as the control's own.
+export function validatorProof(slot, validators, eligible, labels, { context = [], aliases = {} } = {}) {
+  const ctl = (c) => (Object.hasOwn(aliases, c) ? aliases[c] : c);
+  const own = (c) => context.filter((f) => f && f.id === c).map((f) => f.label);
+  const slotsOf = (val) => labelsIn(val.message, labels, own(val.control));
   const mentions = [];
   for (const val of validators) {
-    const slots = labelsIn(val.message, labels);
+    const slots = slotsOf(val);
     if (!slots.includes(slot)) continue;
     if (slots.length > 1) return { ok: false, reason: 'compound_message' };
     mentions.push(val);
   }
-  const own = mentions.filter((x) => x.enabled !== false && validatorLabel(x.message, labels[slot], { anchored: true }));
-  if (!own.length) return { ok: false, reason: 'no_validator' };
-  const controls = [...new Set(mentions.map((x) => x.control))];
+  const anchored = mentions.filter((x) => x.enabled !== false && validatorLabel(x.message, labels[slot], { anchored: true }));
+  if (!anchored.length) return { ok: false, reason: 'no_validator' };
+  const controls = [...new Set(mentions.map((x) => ctl(x.control)))];
   if (controls.length !== 1) return { ok: false, reason: 'multiple_controls' };
   const [id] = controls;
   if (!eligible.has(id)) return { ok: false, reason: 'ineligible_control' };
-  const shared = validators.some((x) => x.control === id && labelsIn(x.message, labels).some((s) => s !== slot));
+  const shared = validators.some((x) => ctl(x.control) === id && slotsOf(x).some((s) => s !== slot));
   if (shared) return { ok: false, reason: 'shared_control' };
-  return { ok: true, id, evidence: { message: own[0].message } };
+  return { ok: true, id, evidence: { message: anchored[0].message } };
 }
