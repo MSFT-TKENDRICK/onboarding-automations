@@ -168,6 +168,55 @@ test('a hidden expected dependent the selected type should show is drift, with t
   assert.equal(R('allowance', f, { optional: true, given: true }).code, 'not_shown');
 });
 
+test('validator proof heals a relabel+rename when page validators name the canonical label for one eligible control', () => {
+  const f = swap(form(), 'desitsm_timezonelist', { id: 'x_lt', name: `${P}x_lt`, label: 'Local Time' });
+  const validators = [{ control: 'x_lt', message: 'Time Zone is a required field.' }, { control: 'apitil_title', message: 'Title is a required field.' }];
+  const r = R('timezone', f, { validators });
+  assert.equal(r.ok, true, JSON.stringify(r));
+  assert.equal(r.via, 'validator');
+  assert.equal(r.id, 'x_lt');
+  assert.deepEqual(r.evidence, { message: 'Time Zone is a required field.' });
+  // Without validators: layer 2 behaviour (drift with a suggestion), plus the legal pool for ranking.
+  const d = R('timezone', f);
+  assert.equal(d.code, 'field_drift');
+  assert.equal(d.suggested.id, 'x_lt');
+  assert.deepEqual(d.pool, ['x_lt']);
+});
+
+test('validator proof is void for owner, reserved, claimed, signature-failing and duplicated controls', () => {
+  const owner = swap(form(), 'desitsm_subscriptionowner', { id: 'x_owner', label: 'Owner (new)' });
+  assert.equal(R('owner', owner, { validators: [{ control: 'x_owner', message: 'Subscription Owner is a required field.' }] }).code, 'field_drift');
+  const f = swap(form(), 'desitsm_timezonelist', { id: 'x_lt', label: 'Local Time' });
+  const val = [{ control: 'x_lt', message: 'Time Zone is a required field.' }];
+  const reservedRun = R('timezone', f, { validators: val, reserved: new Set(['x_lt']) });
+  assert.equal(reservedRun.code, 'field_drift');
+  assert.deepEqual(reservedRun.pool, []);
+  assert.equal(R('timezone', f, { validators: val, claimed: new Set(['x_lt']) }).code, 'field_absent');
+  const money = swap(form(), 'desitsm_timezonelist', { id: 'x_lt', label: 'Local Time', options: MONEY });
+  assert.notEqual(R('timezone', money, { validators: val }).via, 'validator');
+  const dup = [...f, sel('x_lt2', 'Local Time', TZ)];
+  const two = R('timezone', dup, { validators: [...val, { control: 'x_lt2', message: 'Time Zone is a required field.' }] });
+  assert.equal(two.code, 'field_drift');
+  assert.deepEqual([...two.pool].sort(), ['x_lt', 'x_lt2']);
+});
+
+test('field_absent only when the expected id is gone and nothing legal or similar remains', () => {
+  const gone = swap(form(), 'desitsm_timezonelist', null);
+  const r = R('timezone', gone, { validators: [] });
+  assert.equal(r.code, 'field_absent', JSON.stringify(r));
+  assert.equal(r.expectedId, 'desitsm_timezonelist');
+  // A changed control (still there, signature fails) is drift, not absent.
+  assert.equal(R('timezone', swap(form(), 'desitsm_timezonelist', { options: MONEY }), { validators: [] }).code, 'field_drift');
+  // Another slot's own control is not a legal candidate.
+  const t = R('tenantType', swap(form(), 'desitsm_tenanttypes', null), { optional: true, applicable: true, reserved: new Set(Object.values(SLOT_IDS)) });
+  assert.equal(t.code, 'field_absent', JSON.stringify(t));
+  // Legal pool: eligible (signature ok), heuristic order, no reserved ids.
+  const d = R('tenantType', swap(form(), 'desitsm_tenanttypes', null), { optional: true, applicable: true, reserved: new Set(['desitsm_subscriptiontypes']) });
+  assert.equal(d.code, 'field_drift');
+  assert.ok(!d.pool.includes('desitsm_subscriptiontypes'), JSON.stringify(d.pool));
+  assert.ok(d.pool.includes('desitsm_timezonelist'));
+});
+
 test('fingerprint covers the descriptor (not the value) and ignores option order', () => {
   const a = sel('x', 'Time Zone', TZ);
   assert.equal(fingerprint(a), fingerprint({ ...a, value: 'tz-pst', required: false, visible: false }));

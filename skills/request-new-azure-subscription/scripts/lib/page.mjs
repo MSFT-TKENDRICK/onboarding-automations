@@ -223,6 +223,26 @@ export function readTerms() {
   return { ok: true, text: body.textContent.replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim(), display: text, links };
 }
 
+// Page_Validators as {control, message, enabled}. Read-only: no clicks, no writes, no network. Messages are the
+// complete plain text (never truncated: a proof must see every label a message names).
+export function validatorIndex() {
+  const ENT = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+  const text = (s) => String(s ?? '').replace(/<[^>]*>/g, ' ')
+    .replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (m, e) => {
+      if (e[0] !== '#') return ENT[e.toLowerCase()] ?? m;
+      const n = e[1] === 'x' || e[1] === 'X' ? parseInt(e.slice(2), 16) : parseInt(e.slice(1), 10);
+      return Number.isFinite(n) && n > 0 && n <= 0x10ffff ? String.fromCodePoint(n) : m;
+    })
+    .replace(/\u00a0/g, ' ').replace(/\s+/g, ' ').trim();
+  const off = (v) => v.enabled === false || /^(false|0)$/i.test(String(v.enabled ?? '').trim());
+  const out = [];
+  for (const v of window.Page_Validators || []) {
+    if (!v || typeof v.controltovalidate !== 'string' || !v.controltovalidate) continue;
+    out.push({ control: v.controltovalidate, message: text(v.errormessage), enabled: !off(v) });
+  }
+  return out;
+}
+
 // Client-side validation dry run. Never posts.
 export function validate() {
   const txt = (s) => (s || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();

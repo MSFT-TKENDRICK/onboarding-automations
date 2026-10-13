@@ -38,7 +38,7 @@ All portal work goes through one script, `scripts/mcaps-subscription.mjs` (run i
    - `blocked`: report each blocker (for example an existing active request, or an owner without MCAPS access) and stop.
    - Errors: `vpn_required` or `portal_unreachable` means check the corporate network/VPN and rerun. `auth_required` means rerun with `--headed` and let the user finish sign-in in the window; never handle their credentials. `no_eligible_purpose` means report the portal's message.
 3. **Present the plan**
-   Show the resolved values, calling out every `defaulted` value so the user can override it (re-run `plan` with the changed flag), the derived manager, any `warnings` (especially `possible_duplicate`), and the complete terms text from `terms.text`.
+   Show the resolved values, calling out every `defaulted` value so the user can override it (re-run `plan` with the changed flag), the derived manager, any `warnings` (especially `possible_duplicate`), and the complete terms text from `terms.text`. If `inferred` is present, show each entry (the user's wording and the option it was matched to) and get the user's confirmation before submitting.
 4. **Confirm terms acceptance**
    Ask the user to explicitly accept those terms immediately before submission. Stop if they decline, hesitate, or change any value. A changed value needs a new `plan`. Only use the `terms.sha` from the plan the user just reviewed; never reuse one from an earlier run or copy it without showing the terms.
 5. **Submit the subscription request exactly once**

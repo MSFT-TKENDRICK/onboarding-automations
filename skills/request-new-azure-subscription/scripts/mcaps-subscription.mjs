@@ -12,6 +12,7 @@ import { openSession, openForm, fill, submit, ownRequests, findDuplicates, planM
 import { stateDir, savePlan, loadPlan, readLock, requestKey, planId as hashPlan } from './lib/plan-store.mjs';
 import { systemTimeZone } from './lib/defaults.mjs';
 import { killAllBrowsers } from './lib/browser.mjs';
+import { createSystemOne } from './lib/systemone.mjs';
 
 const HELP = `Usage: node mcaps-subscription.mjs <plan|submit|status|options> [flags]
 Inputs (plan/options), all optional thanks to defaults: --title --purpose --type internal|external
@@ -72,9 +73,9 @@ const readProfile = (dir) => { try { return JSON.parse(readFileSync(profilePath(
 const saveProfile = (dir, p) => { try { writeFileSync(profilePath(dir), JSON.stringify({ ...readProfile(dir), ...p, updatedAt: new Date().toISOString() }, null, 2)); } catch {} };
 
 function publicPlanView(r, { fullTerms }) {
-  const { resolved, derived, defaulted, missing, errors, blockers, warnings, eligibility, validation, terms, status, timings } = r;
+  const { resolved, derived, defaulted, inferred, missing, errors, blockers, warnings, eligibility, validation, terms, status, timings } = r;
   return {
-    status, resolved, defaulted, derived, missing, errors, blockers, warnings,
+    status, resolved, defaulted, ...(inferred?.length ? { inferred } : {}), derived, missing, errors, blockers, warnings,
     eligibility: eligibility?.ok ? { activeRequests: eligibility.active } : eligibility,
     validation: validation && { ok: validation.ok, failures: validation.failures },
     terms: terms?.sha ? { sha: terms.sha, links: terms.links, text: fullTerms || status === 'ready' ? terms.text : `${terms.text.slice(0, 280)}…` } : terms,
@@ -129,7 +130,12 @@ export async function run(argv, { env = process.env, stdinText = () => readFileS
     }
     await openForm(s);
     if (cmd === 'plan' || cmd === 'options') {
-      const r = await fill(s, input, { discover: cmd === 'options', defaults: !v['no-defaults'], timeZone: systemTimeZone(env) });
+      // System One assists plan only: submit and options never create or call it.
+      let systemOne = null;
+      let refused = null;
+      if (cmd === 'plan') try { systemOne = createSystemOne(env); } catch (e) { refused = e.message; log(`systemone refused: ${e.message}`); }
+      const r = await fill(s, input, { discover: cmd === 'options', defaults: !v['no-defaults'], timeZone: systemTimeZone(env), systemOne });
+      if (refused) r.warnings.push({ code: 'systemone_refused', message: `System One is not used: ${refused}` });
       if (r.contactId) saveProfile(dir, { contactId: r.contactId });
       const effective = r.input ?? input;
       if (cmd === 'plan' && r.status === 'ready' && r.contactId) {
@@ -145,7 +151,7 @@ export async function run(argv, { env = process.env, stdinText = () => readFileS
         const id = hashPlan(material);
         const expiresAt = new Date(Date.now() + PLAN_TTL_MS).toISOString();
         savePlan(dir, { planId: id, createdAt: new Date().toISOString(), expiresAt, formUrl, input: effective, material, terms: { sha: r.terms.sha } });
-        Object.assign(out, { planId: id, expiresAt, next: `Show the user the plan and the full terms. Only after they explicitly accept: node mcaps-subscription.mjs submit --plan ${id} --accept-terms <terms.sha>` });
+        Object.assign(out, { planId: id, expiresAt, next: `Show the user the plan and the full terms.${r.inferred?.length ? ' Confirm every inferred value with the user (their wording was matched to an option by a model).' : ''} Only after they explicitly accept: node mcaps-subscription.mjs submit --plan ${id} --accept-terms <terms.sha>` });
       }
       return { code: EXIT[r.status] ?? 1, out };
     }

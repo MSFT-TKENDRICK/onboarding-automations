@@ -83,7 +83,7 @@ ${error ? `<div id="ValidationSummaryEntityFormView" class="validation-summary a
 <div class="actions"><input type="button" id="InsertButton" name="${INSERT}" value="Submit" disabled="disabled" onclick="javascript:if(typeof entityFormClientValidate === 'function'){if(entityFormClientValidate()){if(typeof Page_ClientValidate === 'function'){if(Page_ClientValidate('')){this.value = 'Processing...';}}}else{return false;}};WebForm_DoPostBackWithOptions(new WebForm_PostBackOptions(&quot;${INSERT}&quot;, &quot;&quot;, true, &quot;&quot;, &quot;&quot;, false, true))"/></div>
 </form>
 <script>window.Microsoft = { Dynamic365: { Portal: { User: ${JSON.stringify({ contactId: cfg.me.contactId, email: cfg.me.upn, userName: cfg.me.upn })} } } };</script>
-<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null })};</script>
+<script>window.__CFG = ${JSON.stringify({ mcaps: cfg.mcaps, loadDelayMs: cfg.loadDelayMs, purposeDelayMs: cfg.purposeDelayMs, vpnFail: cfg.vpnFail, termsText: cfg.termsText, extraRequired: cfg.drift.extraRequired?.id ?? null, tamperOwner: cfg.tamperOwner ?? null, dup: d.duplicateLabel ?? null, clickTamper: d.clickTamper ?? null, validatorLabel: d.validatorLabel ?? null })};</script>
 <script src="/mock-portal.js"></script></body></html>`);
 }
 
@@ -119,9 +119,12 @@ let subscriptionPurposeOptions = '';
   };
   var REQUIRED = ['apitil_title', 'desitsm_subscriptionpurposeaz', 'apitil_contact_name', 'desitsm_subscriptiontypes', 'desitsm_subscriptionowner', 'desitsm_eslabs_projectlevel', 'desitsm_monthlyspend', 'desitsm_timezonelist', 'desitsm_tenanttypes', 'desitsm_tenantlicensing', 'desitsm_tenantdisplayname'];
   if (C.extraRequired) REQUIRED.push(C.extraRequired);
-  window.Page_Validators = REQUIRED.map(function (id) {
-    var label = ($id(id + '_label') || {}).textContent || id;
-    return { controltovalidate: undefined, enabled: true, isvalid: true, errormessage: "<a href='#!' onclick='setFocusAndScrollPosition(" + id + ")'> " + label + " is a required field.</a>", _id: id };
+  if (C.dup) REQUIRED.push(C.dup.id);
+  // Live shape: a RequiredFieldValidator per control, message naming the label as rendered at load (or, with
+  // drift.validatorLabel, the label the portal's validator still carries after a relabel).
+  window.Page_Validators = REQUIRED.filter(function (id) { return !!$id(id); }).map(function (id) {
+    var label = (C.validatorLabel && C.validatorLabel[id]) || ($id(id + '_label') || {}).textContent || id;
+    return { controltovalidate: id, enabled: true, isvalid: true, errormessage: "<a href='#" + id + "_label' onclick='javascript:scrollToAndFocus(\"" + id + "_label\",\"" + id + "\");return false;' referenceControlId=" + id + ">" + label + " is a required field. </a>", _id: id };
   });
   window.Page_ClientValidate = function () {
     var msgs = [];

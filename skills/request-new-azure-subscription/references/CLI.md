@@ -51,10 +51,11 @@ Every input is optional. Values not given are defaulted and listed in `defaulted
 | `status` | `ready`, `needs_input`, `invalid` or `blocked`. |
 | `resolved` | Each field's matched `{ label, value }`. |
 | `defaulted` | `[{ field, value, reason }]`: values the user did not give. Show them so the user can override. |
+| `inferred` | Present only when System One is configured and matched the user's own wording to an option (`purpose`, `timezone`, `tenantType`, `tenantLicensing` only): `[{ field, wanted, value, label, confidence }]`. The exact option is in `resolved` (`matchedBy: systemone`) and in the plan. Confirm each one with the user before `submit`; rerun with their exact choice if they disagree. |
 | `derived` | Values the portal derives, for example `manager`. |
-| `missing` / `errors` | `{ field, message, options?, candidates? }`: ask the user. `missing` code `field_drift` (`{ field, expectedId, label?, suggested?: { id, label, evidence }, candidates }`): the control for a named input changed and was not auto-bound. Show `suggested` (when present) and rerun with `--map <field>=<id>` only after the user approves. `errors` code `invalid_mapping` (`{ field, id, reason }`): a `--map` target failed the live checks. |
+| `missing` / `errors` | `{ field, message, options?, candidates? }`: ask the user. `missing` code `field_drift` (`{ field, expectedId, label?, suggested?: { id, label, evidence }, candidates }`): the control for a named input changed and was not auto-bound. Show `suggested` (when present) and rerun with `--map <field>=<id>` only after the user approves. With System One configured the entry also has `rankedBy: systemone`, `candidates[].p`, `pNone` and, when more than 20 controls were eligible, `truncated: { shown, total }`; a ranking only orders suggestions and never binds a field. `missing` code `field_absent` (`{ field, expectedId }`): the control is gone and no eligible control remains; tell the user the skill needs an update. `errors` code `invalid_mapping` (`{ field, id, reason }`): a `--map` target failed the live checks. |
 | `blockers` | Codes include `active_request`, `mcaps_access`, `owner_cleared`, `owner_not_found`, `manager_missing`, `unknown_required_field`, `portal_validation`, `form_drift` (the owner control changed, which is never auto-healed, or a bound control no longer posts the value that was set). |
-| `warnings` | Codes include `possible_duplicate`, `portal_note`, `portal_check_pending`, `input_ignored`, `field_remapped` (`{ field, expectedId, id, label, via }`: a named input was bound to a different control than expected, `via: renamed` for a pure rename with the exact same label, `via: mapped` for `--map`; show it with the plan). |
+| `warnings` | Codes include `possible_duplicate`, `portal_note`, `portal_check_pending`, `input_ignored`, `field_remapped` (`{ field, expectedId, id, label, via }`: a named input was bound to a different control than expected, `via: renamed` for a pure rename with the exact same label, `via: mapped` for `--map`, `via: validator` with `evidence: { message }` when the portal's own required-field validator for the slot's label points at exactly one eligible control; show it with the plan). `systemone_refused`: `MCAPS_SYSTEMONE_URL` is not an allowed endpoint, so the plan ran without it. |
 | `terms` | `{ sha, text, links }`. Show `text` to the user; pass `sha` to `submit` only after they accept. |
 | `planId`, `expiresAt`, `next` | Present when `ready`. |
 | `ms`, `phases`, `timings`, `profile` | Performance data; `profile` is `persistent` or `throwaway`. |
@@ -130,5 +131,10 @@ The browser is controlled over `--remote-debugging-pipe`, so no DevTools TCP por
 | `MCAPS_LOG_FILE` | Append the diagnostic log to a file. |
 | `MCAPS_TRACE_NET=1` | Log every network request with its duration (performance work). |
 | `MCAPS_PORTAL_URL` | Point at another portal URL (tests use a local mock). |
+| `MCAPS_SYSTEMONE_URL` | Optional System One (TypeSafe-compatible) endpoint for `plan` only, for example `http://127.0.0.1:8700`. Unset (the default) disables it and the output is unchanged. Loopback only unless the https host is in `MCAPS_SYSTEMONE_ALLOW_REMOTE`. See [DRIFT.md](DRIFT.md). |
+| `MCAPS_SYSTEMONE_MODEL` | Model name (default `clm-latest`). |
+| `MCAPS_SYSTEMONE_KEY` / `TYPESAFE_API_KEY` | Bearer key, if the endpoint needs one. |
+| `MCAPS_SYSTEMONE_ALLOW_REMOTE` | Comma-separated https hosts allowed besides loopback. |
+| `MCAPS_SYSTEMONE_TIMEOUT_MS` | Per-question timeout (default 2000). A timeout or bad answer is ignored: the plan falls back to the deterministic result. |
 
 Behind a TLS-inspecting proxy, set `NODE_EXTRA_CA_CERTS` to the corporate root CA. With Node 24+, set `NODE_USE_ENV_PROXY=1` to honor `HTTPS_PROXY`. The browser uses the system proxy settings.
