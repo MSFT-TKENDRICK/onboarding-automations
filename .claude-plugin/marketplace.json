@@ -10,11 +10,12 @@
   "plugins": [
     {
       "name": "onboarding-skills",
-      "description": "Onboarding skills for Microsoft employees, such as requesting a new Azure subscription.",
+      "description": "Onboarding skills for Microsoft employees, such as requesting a new Azure subscription or a new GitHub repository.",
       "source": "./",
       "strict": false,
       "skills": [
-        "./skills/request-new-azure-subscription"
+        "./skills/request-new-azure-subscription",
+        "./skills/request-new-github-repository"
       ]
     }
   ]

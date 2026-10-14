@@ -7,6 +7,7 @@
 | Skill | What it does |
 | --- | --- |
 | [`request-new-azure-subscription`](skills/request-new-azure-subscription/SKILL.md) | Submits a new MCAPS, ESLabs, or internal Azure subscription request through the MCAPS Services portal and returns the support case ID. Uses a zero-dependency Node script that drives headless Edge over the DevTools protocol with your corporate SSO; see its [benchmarks](skills/request-new-azure-subscription/references/BENCHMARKS.md). |
+| [`request-new-github-repository`](skills/request-new-github-repository/SKILL.md) | Creates a new non-production GitHub EMU repository through StartRight, the sanctioned self-service path, and returns its URL. Refuses production, TCB and HVT code and points to GitHub Proxima. Contract-tested against a local mock: the live create call is never exercised by tests. |
 
 ## Requirements
 
@@ -75,7 +76,8 @@ The harness matches the request to the skill's `description`, loads `SKILL.md`, 
 ```bash
 pip install skills-ref
 python -m skills_ref.cli validate skills/request-new-azure-subscription
-npm test            # unit + end-to-end tests against a local mock portal (needs Edge/Chrome; skipped otherwise)
+python -m skills_ref.cli validate skills/request-new-github-repository
+npm test            # unit + end-to-end tests against local mock services (needs Edge/Chrome; skipped otherwise)
 npm run test:unit   # unit tests only
 npm run bench       # plan timings against the mock portal
 ```

@@ -19,6 +19,7 @@
 - Prefer zero-dependency Node.js (>= 22) scripts that print one JSON object on stdout and use documented exit codes, so any harness can call them and parse the result.
 - Split read-only commands (safe to pre-approve in `allowed-tools`) from commands with side effects (left for the harness to confirm).
 - Test against a local mock of the service that reproduces its hostile behavior (slow calls, races, lost responses). Never run tests against the live service's write paths.
+- For services that audit requests (for example StartRight), test by **contract**: record the API shapes from read-only probing, encode them in one contract module, check every request and response of an independent mock against it, and give the write guard a kill switch that refuses non-loopback writes under `node --test`.
 
 ## Authoring rules for onboarding skills
 
