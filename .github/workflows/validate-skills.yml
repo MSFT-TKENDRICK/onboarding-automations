@@ -62,3 +62,4 @@ jobs:
         run: npm test
         env:
           MCAPS_BROWSER: /usr/bin/google-chrome
+          STARTRIGHT_BROWSER: /usr/bin/google-chrome

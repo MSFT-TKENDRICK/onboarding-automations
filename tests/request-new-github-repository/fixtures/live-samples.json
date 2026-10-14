@@ -1,0 +1,111 @@
+[
+ {
+  "id": "membership",
+  "status": 200,
+  "body": {
+   "organization": "org-0",
+   "state": "active",
+   "role": "member"
+  }
+ },
+ {
+  "id": "joinable",
+  "status": 400,
+  "body": {
+   "status": 400,
+   "retryable": false,
+   "type": "urn:startright:problem:repository-invalid-request",
+   "title": "The request is invalid.",
+   "correlationId": "REDACTED"
+  }
+ },
+ {
+  "id": "availability",
+  "status": 200,
+  "body": {
+   "organization": "org-0",
+   "name": "zz-contract-probe-does-not-exist-9183",
+   "available": true
+  }
+ },
+ {
+  "id": "availability",
+  "status": 400,
+  "body": {
+   "status": 400,
+   "retryable": false,
+   "type": "urn:startright:problem:repository-invalid-request",
+   "title": "The request is invalid.",
+   "correlationId": "REDACTED"
+  }
+ },
+ {
+  "id": "principals",
+  "status": 200,
+  "body": [
+   {
+    "principalId": "00000000-0000-4000-8000-000000000001",
+    "principalRef": "REDACTED-0",
+    "type": "user",
+    "displayName": "Person 0",
+    "isRequester": true,
+    "secondaryText": "person0@example.com",
+    "expiresAt": "2030-01-01T00:00:00Z"
+   }
+  ]
+ },
+ {
+  "id": "principals",
+  "status": 200,
+  "body": [
+   {
+    "principalId": "00000000-0000-4000-8000-000000000001",
+    "principalRef": "REDACTED-0",
+    "type": "user",
+    "displayName": "Person 0",
+    "isRequester": true,
+    "secondaryText": "person0@example.com",
+    "expiresAt": "2030-01-01T00:00:00Z"
+   }
+  ]
+ },
+ {
+  "id": "joinable",
+  "status": 200,
+  "body": [
+   {
+    "login": "org-0",
+    "displayName": "Org 0",
+    "avatarUrl": "https://avatars.invalid/x"
+   }
+  ]
+ },
+ {
+  "id": "restriction",
+  "status": 200,
+  "body": {
+   "blocked": false
+  }
+ },
+ {
+  "id": "restriction",
+  "status": 400,
+  "body": {
+   "status": 400,
+   "retryable": false,
+   "type": "urn:startright:problem:repository-invalid-request",
+   "title": "The request is invalid.",
+   "correlationId": "REDACTED"
+  }
+ },
+ {
+  "id": "membership",
+  "status": 404,
+  "body": {
+   "status": 404,
+   "retryable": false,
+   "title": "The organization or membership was not found.",
+   "correlationId": "REDACTED"
+  }
+ }
+]
