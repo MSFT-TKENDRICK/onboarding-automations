@@ -42,6 +42,9 @@ Inputs (plan):
     With no ownership given, your manager is the second direct owner (and gets maintain), and everyone else who reports to
     your manager is added as a team member (GitHub handle <alias>_microsoft, matched in StartRight by exact e-mail).
     --team-role <read|triage|write>   role for the default team (default write)
+    --team-group <group>         use an Entra group as the default team instead of adding the people one by one. Only
+                                 accepted when Graph shows it holds nobody but your manager's team (options --show-team lists
+                                 candidates); a new group can take 5-6 hours to reach GitHub.
     --no-default-team            do not add the people who report to your manager
     --no-manager-owner           do not default your manager as co-owner
   --json <file|->                the same inputs as one JSON object (flags override it)
@@ -128,7 +131,7 @@ function parse(argv) {
       'service-tree': { type: 'string' }, 'service-tree-name': { type: 'string' }, 'direct-owner': { type: 'string', multiple: true }, access: { type: 'string', multiple: true }, json: { type: 'string' },
       plan: { type: 'string' }, 'accept-terms': { type: 'string' }, repo: { type: 'string' },
       'find-service': { type: 'string' }, 'find-principal': { type: 'string' }, purpose: { type: 'string' }, 'show-team': { type: 'boolean' },
-      'team-role': { type: 'string' }, 'no-default-team': { type: 'boolean' }, 'no-manager-owner': { type: 'boolean' },
+      'team-role': { type: 'string' }, 'team-group': { type: 'string' }, 'no-default-team': { type: 'boolean' }, 'no-manager-owner': { type: 'boolean' },
       headed: { type: 'boolean' }, ephemeral: { type: 'boolean' }, browser: { type: 'string' }, verbose: { type: 'boolean' }, pretty: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     },
   });
@@ -146,6 +149,7 @@ function readInput(v, stdinText) {
   if (v['direct-owner']?.length) raw.owners = v['direct-owner'];
   if (v.access?.length) raw.access = v.access;
   if (v['team-role'] !== undefined) raw.teamRole = v['team-role'];
+  if (v['team-group'] !== undefined) raw.teamGroup = v['team-group'];
   if (v['no-default-team']) raw.noDefaultTeam = true;
   if (v['no-manager-owner']) raw.noManagerOwner = true;
   return normalizeInput(raw);
@@ -154,7 +158,7 @@ function readInput(v, stdinText) {
 const plansView = (r) => {
   const ready = r.status === 'ready';
   return {
-    status: r.status, resolved: r.resolved ?? undefined, defaulted: r.defaulted, missing: r.missing, errors: r.errors, blockers: r.blockers, warnings: r.warnings,
+    status: r.status, resolved: r.resolved ?? undefined, defaulted: r.defaulted, missing: r.missing, errors: r.errors, blockers: r.blockers, warnings: r.warnings, references: r.references,
     terms: ready ? termsView() : { sha: termsView().sha, text: `${termsView().text.slice(0, 200)}…` },
   };
 };

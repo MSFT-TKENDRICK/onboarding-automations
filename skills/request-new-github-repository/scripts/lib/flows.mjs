@@ -4,9 +4,9 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { SkillError } from './client.mjs';
 import { CreateBody, validate, classifyCreate, checkResponse, isGuid } from './contract.mjs';
-import { TERMS, WARN, PROXIMA_GUIDANCE, LINKS, classify, validateRepo, parseRole, accessErrors } from './policy.mjs';
+import { TERMS, WARN, PROXIMA_GUIDANCE, LINKS, classify, validateRepo, parseRole, isAdminRole, accessErrors } from './policy.mjs';
 import { aliasOf, candidateView, lookupPrincipals, lookupTerm, resolvePerson, resolveRequester, refindPrincipal, searchCatalog } from './resolve.mjs';
-import { TEAM_LIMIT, TEAM_ROLES, DEFAULT_TEAM_ROLE, loadOrgContext, findStartRightUser } from './team.mjs';
+import { TEAM_LIMIT, TEAM_ROLES, DEFAULT_TEAM_ROLE, loadOrgContext, findStartRightUser, verifyTeamGroup, suggestTeamGroups } from './team.mjs';
 import { acquireSubmitLock, markSent, recordOutcome, releaseUnsent, readLock, requestKey } from './plan-store.mjs';
 
 export const PLAN_SCHEMA = 1;
@@ -16,10 +16,12 @@ const t = (v) => (v === undefined || v === null ? undefined : String(v).trim());
 
 export function normalizeInput(raw = {}) {
   const list = (v) => (Array.isArray(v) ? v : v === undefined ? [] : [v]).map((x) => String(x).trim()).filter(Boolean);
+  const teamRole = t(raw.teamRole);
   return {
     org: t(raw.org), name: t(raw.name), description: t(raw.description), visibility: t(raw.visibility)?.toLowerCase(), classification: t(raw.classification),
     serviceTree: t(raw.serviceTree), serviceTreeName: t(raw.serviceTreeName), owners: list(raw.owners), access: list(raw.access),
-    noDefaultTeam: raw.noDefaultTeam === true, noManagerOwner: raw.noManagerOwner === true, teamRole: t(raw.teamRole)?.toLowerCase(),
+    noDefaultTeam: raw.noDefaultTeam === true, noManagerOwner: raw.noManagerOwner === true, teamGroup: t(raw.teamGroup),
+    teamRole: teamRole === undefined ? undefined : (parseRole(teamRole) ?? teamRole.toLowerCase()),
   };
 }
 
@@ -27,8 +29,10 @@ export function parseAccess(spec) {
   const i = String(spec).lastIndexOf('=');
   if (i < 1) return { error: { code: 'access_role_required', field: 'access', query: spec, message: `"${spec}": use <person-or-group>=<role>, with a role of read, triage, write or maintain.` } };
   const who = spec.slice(0, i).trim();
-  const role = parseRole(spec.slice(i + 1));
-  if (!who || !role) return { error: { code: 'access_role_invalid', field: 'access', query: spec, message: `"${spec}": the role must be read, triage, write or maintain.` } };
+  const roleText = spec.slice(i + 1);
+  if (isAdminRole(roleText)) return { error: { code: 'access_role_admin', field: 'access', query: spec, message: `"${spec}": an access list cannot grant admin. Admin is requested just in time (JIT), see ${LINKS.accessControl}.`, links: [LINKS.accessControl] } };
+  const role = parseRole(roleText);
+  if (!who || !role) return { error: { code: 'access_role_invalid', field: 'access', query: spec, message: `"${spec}": the role must be read, triage, write or maintain (the policy's pull and push mean read and write).` } };
   return { who, role };
 }
 
@@ -53,6 +57,7 @@ export function localCheck(input) {
   if (input.owners.length > 2) out.errors.push({ code: 'too_many_owners', field: 'ownership', message: 'Direct ownership takes exactly two owners (you plus one other).' });
   if (!modes.length) out.missing.push({ field: 'ownership', code: 'ownership_required', message: 'Ask the user who owns the repository: a Service Tree entry (--service-tree <guid> or --service-tree-name <name>) or one other direct owner (--direct-owner <person>; you are added as the second).' });
   if (input.teamRole && !TEAM_ROLES.includes(input.teamRole)) out.errors.push({ code: 'team_role_invalid', field: 'teamRole', message: `--team-role must be ${TEAM_ROLES.join(', ')} (maintain is only given to you and your manager).` });
+  if (input.teamGroup && input.noDefaultTeam) out.errors.push({ code: 'team_group_conflict', field: 'teamGroup', message: '--team-group is the default team, so it cannot be combined with --no-default-team. Use --access <group>=<role> to add a group that is not your manager\'s team.' });
 
   for (const spec of input.access) {
     const p = parseAccess(spec);
@@ -75,6 +80,10 @@ async function memberOrg(s, org) {
 }
 
 const personView = (p) => ({ displayName: p.displayName, type: p.type, ...(p.email ? { email: p.email } : {}), ...(p.githubHandle ? { githubHandle: p.githubHandle } : {}) });
+const nickOf = (v) => String(v ?? '').trim().split('@')[0];
+
+// Where the access and team defaults come from, shown with every plan so the user can check them.
+export const REFERENCES = { accessControl: LINKS.accessControl, policyService: LINKS.policyService, exampleRepository: LINKS.exampleRepo };
 
 // ---------------------------------------------------------------- plan
 export async function runPlan(s, input, local, { graph } = {}) {
@@ -124,7 +133,7 @@ export async function runPlan(s, input, local, { graph } = {}) {
   const wantManager = !input.noManagerOwner;
   const wantTeam = !input.noDefaultTeam;
   let orgCtx = null;
-  if (graph && (wantManager || wantTeam)) {
+  if (graph && (wantManager || wantTeam || input.teamGroup)) {
     orgCtx = await loadOrgContext(graph, aliasOf(requester.login));
     if (!orgCtx.ok) { R.warnings.push({ code: 'org_defaults_skipped', reason: orgCtx.code, message: `Your manager and default team could not be looked up, so they were not added: ${orgCtx.message}` }); orgCtx = null; }
   }
@@ -194,8 +203,24 @@ export async function runPlan(s, input, local, { graph } = {}) {
       }
     }
 
+    // Default team as an Entra group (the policy prefers groups): only a group that provably holds nobody but your manager's
+    // team is accepted, and it replaces the individual default entries.
+    if (input.teamGroup && !R.errors.some((e) => e.field === 'teamGroup')) {
+      const g = await find('teamGroup', input.teamGroup, 'acl', 'group');
+      if (g) {
+        const v = orgCtx ? await verifyTeamGroup(graph, orgCtx, { displayName: g.displayName, keys: [nickOf(input.teamGroup), nickOf(g.secondaryText)] }) : { ok: false, code: 'team_group_unverifiable', message: 'Your manager\'s team could not be looked up (see the org_defaults_skipped warning), so the group\'s members cannot be checked.' };
+        if (!v.ok) R.errors.push({ code: v.code, field: 'teamGroup', message: v.message, ...(v.outsiders ? { outsiders: v.outsiders } : {}) });
+        else {
+          const role = input.teamRole ?? DEFAULT_TEAM_ROLE;
+          if (!acl.some((a) => a.principalId === g.principalId)) acl.push({ ...g, role });
+          R.defaulted.push({ field: 'access', value: `${g.displayName} (group): ${role}`, why: `the default team, as an Entra group that holds only the people who report to ${orgCtx.manager.displayName} (checked in Microsoft Graph); the people are not added individually` });
+          if (v.missing.length) R.warnings.push({ code: 'team_group_partial', message: `The group does not contain ${v.missing.map((p) => `${p.displayName} (${p.githubHandle})`).join(', ')}, who report to your manager, so they get no access from it. Add them with --access if they need it.` });
+        }
+      }
+    }
+
     // Default team: everyone else who reports to your manager, matched to StartRight by exact e-mail.
-    if (orgCtx && wantTeam) {
+    if (orgCtx && wantTeam && !input.teamGroup) {
       if (orgCtx.peers.length > TEAM_LIMIT) R.missing.push({ field: 'access', code: 'default_team_too_large', count: orgCtx.peers.length, message: `${orgCtx.manager.displayName} has ${orgCtx.peers.length} direct reports, more than the ${TEAM_LIMIT} a default team may hold. Ask the user to list the people (--access <person>=write) or to skip the default team (--no-default-team).` });
       else {
         const role = input.teamRole ?? DEFAULT_TEAM_ROLE;
@@ -242,7 +267,7 @@ function finish(R, material, requester, extra = {}) {
     ownership: m.ownership.type === 'serviceTree' ? { type: 'serviceTree', serviceTreeId: m.ownership.serviceTreeId, ...(m.ownership.serviceName ? { name: m.ownership.serviceName } : {}) } : { type: 'directOwners', owners: m.ownership.owners.map(personView) },
     access: m.access.map((a) => ({ ...personView(a), role: a.role })),
   };
-  return { status, material, resolved, missing: R.missing, errors: R.errors, blockers: R.blockers, defaulted: R.defaulted, warnings: R.warnings, requester: requester?.login, ...extra };
+  return { status, material, resolved, missing: R.missing, errors: R.errors, blockers: R.blockers, defaulted: R.defaulted, warnings: R.warnings, requester: requester?.login, references: REFERENCES, ...extra };
 }
 
 export const termsView = () => ({ sha: TERMS.sha, text: TERMS.text, links: TERMS.links });
@@ -394,6 +419,9 @@ export async function runOptions(s, { org, findService, findPrincipal, purpose, 
       const view = async (person) => ({ displayName: person.displayName, email: person.email, githubHandle: person.githubHandle, inOrganization: !!(await findStartRightUser(s, { org: match.login, purpose: 'acl', person })) });
       out.team = { available: true, organization: match.login, manager: await view(ctx.manager), members: [], defaultRole: DEFAULT_TEAM_ROLE, tooLarge: ctx.peers.length > TEAM_LIMIT };
       for (const peer of ctx.peers.slice(0, TEAM_LIMIT)) out.team.members.push(await view(peer));
+      // Groups that already hold your manager's team: use one with --team-group. Previewed only, never chosen here.
+      out.team.groups = await suggestTeamGroups(graph, ctx);
+      out.team.references = REFERENCES;
     }
   }
   if (findService) {

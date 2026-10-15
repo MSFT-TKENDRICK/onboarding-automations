@@ -24,6 +24,12 @@ The skill automates only the path Microsoft sanctions for **non-production** rep
 
 This is a convenience of the skill, not a GiM requirement. Direct ownership needs two owners, so the requester's manager (Microsoft Graph `/me/manager`) is the default second owner, and the manager's other direct reports (`/users/{id}/directReports`) are the default team. Graph stores no GitHub handle. The skill uses the documented EMU handle `<alias>_microsoft` (GiM EMU FAQ) and adds a person only when StartRight's own principal search returns exactly one match for their e-mail in the target organization. The plan lists every defaulted person with handle and role so the user sees and can change them before accepting; no one is added silently.
 
+## Teams and access (GiM Policy Service, Access Control)
+
+Teams and access are defined by the GiM [Policy Service](https://eng.ms/docs/more/github-inside-microsoft/policies/index.html) and [Access Control](https://eng.ms/docs/more/github-inside-microsoft/policies/access.html) pages (both are returned as `references` in every plan). Access is repository-level, kept in `.github/acl/access.yml` with `member` (a person alias), `team` (an Entra group alias) and `role` (Read, Pull, Triage, Write, Push, Maintain; Admin only through JIT). Only Security, M365 and Dynamic groups work, mail-enabled ones are preferred, nested groups are not expanded, and a new group's access takes about 5-6 hours. The example repository <https://github.com/gim-home/us-ss-fis-onboarding> follows this: its ACL names the owner and manager as `member` with Maintain and a directs group as `team` with Push.
+
+The skill follows the same vocabulary (`pull`=read, `push`=write, admin refused) and gives immediate access to individuals. `--team-group` uses a `team` group, but only after proving the group holds nobody except your manager's team. This guard is deliberate: when recording, that example repository's `FrankDirects` group held seven people, none of whom reported to the manager it was named after, while several look-alike groups with similar names existed. Name similarity proves nothing.
+
 ## Not accessible when recording
 
 Proxima (`msft.ghe.com`) could not be opened with the recording account (Entra AADSTS 53003, Conditional Access), so the Proxima flow is guidance only and is not automated.
