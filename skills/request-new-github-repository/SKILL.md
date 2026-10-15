@@ -6,7 +6,7 @@ compatibility: "Node.js >= 22, Microsoft Edge or Google Chrome, corporate networ
 metadata:
   audience: microsoft-employees
   category: onboarding
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Create a new GitHub repository (StartRight)
@@ -29,12 +29,13 @@ Run `node <skill>/scripts/startright-repo.mjs <command>`, where `<skill>` is thi
 ## Workflow
 
 1. **Gather** from the user: owner organization (`--org`), name (`--name`), a description (`--description`, required), the production answer, who owns it, and who gets access. Defaults: visibility `internal`. `options` helps: `options` lists the user's organizations, `options --find-service <text>` searches Service Tree, `options --org <org> --find-principal <text>` searches people and groups.
-   - Ownership, exactly one of: `--service-tree <guid>`, `--service-tree-name <exact name>`, or `--direct-owner <person>` (the requester is added as the second owner).
+   - Ownership: `--service-tree <guid>`, `--service-tree-name <exact name>` or `--direct-owner <person>` (the requester is added as the second owner). If the user names none, the plan defaults to the requester and their manager from Microsoft Graph (see below).
    - Access: `--access "<person-or-group>=<read|triage|write|maintain>"`, repeatable. The requester is added with `maintain`. At least one group, or two people, must hold `maintain`.
+   - Manager and team defaults: unless the user gives another owner, their manager becomes the second direct owner (and gets `maintain`; with a Service Tree owner the manager just gets `maintain`, since that cannot be co-ownership). Everyone else who reports to that manager is added as a default team with `write` (`--team-role read|triage|write`). Handles are `<alias>_microsoft`, each checked in StartRight by exact e-mail. Needs the Azure CLI signed in as the same person (`az login`). Opt out with `--no-manager-owner` and `--no-default-team`. `options --org <org> --show-team` previews the people and their handles without planning.
 2. **Plan:**
    `node <skill>/scripts/startright-repo.mjs plan --org <org> --name <name> --description "<text>" --classification non-production --direct-owner <person> --access "<group>=maintain"`
 3. **Resolve** the plan using [Plan results](#plan-results). Re-plan with the same flags plus the user's answers until `status` is `ready`.
-4. **Present** the plan: every `resolved` value, every `defaulted` value (offer to change it), every `warnings` entry, then the complete `terms.text` and `terms.links` verbatim.
+4. **Present** the plan: every `resolved` value, every `defaulted` value (offer to change it; name the manager and each default team member with their GitHub handle and role, and offer `--no-manager-owner` or `--no-default-team`), every `warnings` entry, then the complete `terms.text` and `terms.links` verbatim.
 5. **Get explicit acceptance.** Ask whether the user accepts these terms and wants this repository created. Continue only on a clear yes. Any change needs a new `plan`, new terms and a new acceptance. A plan expires at `expiresAt` (30 minutes).
 6. **Submit once:**
    `node <skill>/scripts/startright-repo.mjs submit --plan <planId> --accept-terms <terms.sha>`
@@ -54,6 +55,8 @@ Run `node <skill>/scripts/startright-repo.mjs <command>`, where `<skill>` is thi
 | `classification` | Ask the production question above. |
 | `org`, `name`, `description` | Ask the user. For `org`, offer `options`. |
 | `ownership` | Ask who owns the repository: a Service Tree entry or one other direct owner. |
+| `ownership_required` | Nobody could be defaulted as owner (see the `org_defaults_skipped` or `manager_not_found` warning). Ask who owns it. |
+| `default_team_too_large` | Your manager has too many reports for a default team. Ask who to add (`--access`), or use `--no-default-team`. |
 | `ambiguous_person` | Show `candidates` (name, e-mail). Re-plan with the e-mail the user picks. Never pick one. |
 | `ambiguous_service` | Show `candidates`. Re-plan with `--service-tree <id>` for the one the user picks. |
 | `second_owner` | Ask for the other direct owner. |
@@ -64,7 +67,7 @@ Run `node <skill>/scripts/startright-repo.mjs <command>`, where `<skill>` is thi
 | `name_invalid`, `name_too_long` | Show `message` and `suggestion` when present; ask for the name. Never rename silently. |
 | `name_unavailable` | The name exists or is reserved. Ask for another. |
 | `org_unknown` | Show the user's organizations (`candidates`). Ask. |
-| `description_too_long`, `visibility_invalid`, `org_invalid`, `classification_invalid` | Show `message`; ask for a corrected value. |
+| `description_too_long`, `visibility_invalid`, `org_invalid`, `classification_invalid`, `team_role_invalid` | Show `message`; ask for a corrected value. |
 | `person_not_found` | Ask for the person's exact e-mail, alias or full name; `options --find-principal` can search. |
 | `service_not_found`, `service_tree_invalid` | Show `message` and `candidates` when present; ask. |
 | `ownership_conflict`, `too_many_owners`, `owner_duplicate`, `requester_not_found`, `access_*`, `requester_must_maintain` | Show `message`; fix the input with the user. |
@@ -81,6 +84,9 @@ Run `node <skill>/scripts/startright-repo.mjs <command>`, where `<skill>` is thi
 | `secret_scan` | Tell the user a secret scan runs at creation and results are e-mailed to them. |
 | `propagation_delay`, `group_sync_delay` | Show `message`: permissions take about a minute, and a new Entra group can take 5-6 hours. |
 | `coarse_service_tree` | The Service Tree entry is a Division or Organization. Ask the user to confirm that is intended. |
+| `org_defaults_skipped` | Your manager and team could not be looked up, so they were not added. `reason` is one of `graph_unavailable`, `graph_unauthorized`, `graph_forbidden`, `graph_failed`, `graph_identity_mismatch` (the Azure CLI is signed in as someone else) or `no_manager`. Tell the user; for sign-in problems suggest `az login` as themselves, then re-plan. Never look the people up another way. |
+| `manager_not_found` | StartRight cannot find your manager in that organization. They were not added. Ask who the second owner is. |
+| `team_members_unresolved` | Named people were not added because StartRight finds no exact match in that organization. Show them to the user; they can be added later with `--access`. |
 
 ## Submit results
 

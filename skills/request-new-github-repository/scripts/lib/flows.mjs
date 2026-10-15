@@ -6,6 +6,7 @@ import { SkillError } from './client.mjs';
 import { CreateBody, validate, classifyCreate, checkResponse, isGuid } from './contract.mjs';
 import { TERMS, WARN, PROXIMA_GUIDANCE, LINKS, classify, validateRepo, parseRole, accessErrors } from './policy.mjs';
 import { aliasOf, candidateView, lookupPrincipals, lookupTerm, resolvePerson, resolveRequester, refindPrincipal, searchCatalog } from './resolve.mjs';
+import { TEAM_LIMIT, TEAM_ROLES, DEFAULT_TEAM_ROLE, loadOrgContext, findStartRightUser } from './team.mjs';
 import { acquireSubmitLock, markSent, recordOutcome, releaseUnsent, readLock, requestKey } from './plan-store.mjs';
 
 export const PLAN_SCHEMA = 1;
@@ -18,6 +19,7 @@ export function normalizeInput(raw = {}) {
   return {
     org: t(raw.org), name: t(raw.name), description: t(raw.description), visibility: t(raw.visibility)?.toLowerCase(), classification: t(raw.classification),
     serviceTree: t(raw.serviceTree), serviceTreeName: t(raw.serviceTreeName), owners: list(raw.owners), access: list(raw.access),
+    noDefaultTeam: raw.noDefaultTeam === true, noManagerOwner: raw.noManagerOwner === true, teamRole: t(raw.teamRole)?.toLowerCase(),
   };
 }
 
@@ -49,7 +51,8 @@ export function localCheck(input) {
   if (modes.length > 1) out.errors.push({ code: 'ownership_conflict', field: 'ownership', message: 'Give either a Service Tree entry (--service-tree / --service-tree-name) or direct owners (--direct-owner), not both.' });
   if (input.serviceTree && !isGuid(input.serviceTree)) out.errors.push({ code: 'service_tree_invalid', field: 'serviceTree', message: '--service-tree must be a Service Tree GUID. Use --service-tree-name to look one up by name.' });
   if (input.owners.length > 2) out.errors.push({ code: 'too_many_owners', field: 'ownership', message: 'Direct ownership takes exactly two owners (you plus one other).' });
-  if (!modes.length) out.missing.push({ field: 'ownership', message: 'Ask the user who owns the repository: a Service Tree entry (--service-tree <guid> or --service-tree-name <name>) or one other direct owner (--direct-owner <person>; you are added as the second).' });
+  if (!modes.length) out.missing.push({ field: 'ownership', code: 'ownership_required', message: 'Ask the user who owns the repository: a Service Tree entry (--service-tree <guid> or --service-tree-name <name>) or one other direct owner (--direct-owner <person>; you are added as the second).' });
+  if (input.teamRole && !TEAM_ROLES.includes(input.teamRole)) out.errors.push({ code: 'team_role_invalid', field: 'teamRole', message: `--team-role must be ${TEAM_ROLES.join(', ')} (maintain is only given to you and your manager).` });
 
   for (const spec of input.access) {
     const p = parseAccess(spec);
@@ -71,10 +74,10 @@ async function memberOrg(s, org) {
   return { orgs: r.body, match: org ? r.body.find((o) => sameOrg(o.login, org)) : null };
 }
 
-const personView = (p) => ({ displayName: p.displayName, type: p.type, ...(p.email ? { email: p.email } : {}) });
+const personView = (p) => ({ displayName: p.displayName, type: p.type, ...(p.email ? { email: p.email } : {}), ...(p.githubHandle ? { githubHandle: p.githubHandle } : {}) });
 
 // ---------------------------------------------------------------- plan
-export async function runPlan(s, input, local) {
+export async function runPlan(s, input, local, { graph } = {}) {
   s.guard.setPhase('plan');
   const R = { missing: [...local.missing], errors: [...local.errors], blockers: [...local.blockers], defaulted: [...local.defaulted], warnings: [] };
   await begin(s);
@@ -116,6 +119,17 @@ export async function runPlan(s, input, local) {
     return { ...p, email: candidateView(p).email, lookup: lookupTerm(p) };
   };
 
+  // ---- manager and team defaults (Microsoft Graph); degrade to asking the user when Graph cannot answer
+  const explicitOwnership = !!(input.serviceTree || input.serviceTreeName || input.owners.length);
+  const wantManager = !input.noManagerOwner;
+  const wantTeam = !input.noDefaultTeam;
+  let orgCtx = null;
+  if (graph && (wantManager || wantTeam)) {
+    orgCtx = await loadOrgContext(graph, aliasOf(requester.login));
+    if (!orgCtx.ok) { R.warnings.push({ code: 'org_defaults_skipped', reason: orgCtx.code, message: `Your manager and default team could not be looked up, so they were not added: ${orgCtx.message}` }); orgCtx = null; }
+  }
+  let managerIsOwner = false;
+
   // ---- ownership
   let ownership = null;
   if (input.serviceTree && isGuid(input.serviceTree) && !R.errors.some((e) => e.code === 'ownership_conflict')) {
@@ -148,6 +162,15 @@ export async function runPlan(s, input, local) {
       if (owners.length === 2) { ownership = { type: 'directOwners', owners }; people.ownership = owners; }
       else R.missing.push({ field: 'ownership', code: 'second_owner', message: 'Direct ownership needs two different owners: ask the user for the other owner (--direct-owner <person>).' });
     }
+  } else if (!explicitOwnership && orgCtx && wantManager) {
+    const mgr = await findStartRightUser(s, { org, purpose: 'ownership', person: orgCtx.manager });
+    const rq = mgr ? await me('ownership') : null;
+    if (mgr && rq) {
+      const m = { ...mgr, email: orgCtx.manager.email, lookup: lookupTerm(mgr), githubHandle: orgCtx.manager.githubHandle };
+      ownership = { type: 'directOwners', owners: [rq, m] }; people.ownership = [rq, m]; managerIsOwner = true;
+      R.missing = R.missing.filter((x) => x.code !== 'ownership_required');
+      R.defaulted.push({ field: 'ownership', value: `${rq.displayName} (you) and ${m.displayName} (${m.githubHandle}), your manager`, why: 'your manager is a co-owner by default; pass --direct-owner or a Service Tree entry to choose differently, or --no-manager-owner to opt out' });
+    } else if (!mgr) R.warnings.push({ code: 'manager_not_found', message: `Your manager (${orgCtx.manager.displayName}, ${orgCtx.manager.githubHandle}) is not a person StartRight can find in ${org}, so they were not made co-owner. Ask the user for the second owner.` });
   }
 
   // ---- access
@@ -158,6 +181,37 @@ export async function runPlan(s, input, local) {
     const mine = acl.find((a) => a.principalId === rq.principalId);
     if (mine && mine.role !== 'maintain') R.errors.push({ code: 'requester_must_maintain', field: 'access', message: 'You (the requester) must have the maintain role on the repository you create.' });
     else if (!mine) { acl.unshift({ ...rq, role: 'maintain' }); R.defaulted.push({ field: 'access', value: `${rq.displayName} (you): maintain`, why: 'the requester is always added with the maintain role' }); }
+
+    // Your manager is a co-owner, so they also maintain the repository. A Service Tree owner cannot be a direct co-owner, so
+    // maintain is the closest StartRight can express. Someone else named as owner means the manager is not added.
+    if (orgCtx && wantManager && (managerIsOwner || ownership?.type === 'serviceTree')) {
+      const mgr = await findStartRightUser(s, { org, purpose: 'acl', person: orgCtx.manager });
+      const m = mgr && { ...mgr, email: orgCtx.manager.email, lookup: lookupTerm(mgr), githubHandle: orgCtx.manager.githubHandle };
+      if (!m) R.warnings.push({ code: 'manager_not_found', message: `Your manager (${orgCtx.manager.displayName}, ${orgCtx.manager.githubHandle}) is not a person StartRight can find in ${org}, so they were not given access.` });
+      else if (!acl.some((a) => a.principalId === m.principalId)) {
+        acl.push({ ...m, role: 'maintain' });
+        R.defaulted.push({ field: 'access', value: `${m.displayName} (${m.githubHandle}), your manager: maintain`, why: managerIsOwner ? 'your manager is a co-owner by default' : 'a Service Tree entry owns the repository, so your manager cannot be a direct co-owner; maintain is the closest access StartRight offers' });
+      }
+    }
+
+    // Default team: everyone else who reports to your manager, matched to StartRight by exact e-mail.
+    if (orgCtx && wantTeam) {
+      if (orgCtx.peers.length > TEAM_LIMIT) R.missing.push({ field: 'access', code: 'default_team_too_large', count: orgCtx.peers.length, message: `${orgCtx.manager.displayName} has ${orgCtx.peers.length} direct reports, more than the ${TEAM_LIMIT} a default team may hold. Ask the user to list the people (--access <person>=write) or to skip the default team (--no-default-team).` });
+      else {
+        const role = input.teamRole ?? DEFAULT_TEAM_ROLE;
+        const added = [];
+        const unresolved = [];
+        for (const peer of orgCtx.peers) {
+          const found = await findStartRightUser(s, { org, purpose: 'acl', person: peer });
+          if (!found) { unresolved.push(peer); continue; }
+          if (acl.some((a) => a.principalId === found.principalId)) continue;
+          const entry = { ...found, email: peer.email, lookup: lookupTerm(found), githubHandle: peer.githubHandle, role };
+          acl.push(entry); added.push(entry);
+        }
+        if (added.length) R.defaulted.push({ field: 'access', value: `${added.map((a) => `${a.displayName} (${a.githubHandle})`).join(', ')}: ${role}`, why: `the default team: the people who report to your manager, ${orgCtx.manager.displayName}; pass --no-default-team to skip it` });
+        if (unresolved.length) R.warnings.push({ code: 'team_members_unresolved', message: `Not added, because StartRight finds no single matching person in ${org}: ${unresolved.map((p) => `${p.displayName} (${p.githubHandle})`).join(', ')}. They may not have an EMU account in this organization yet.` });
+      }
+    }
     for (const e of accessErrors(acl.map((a) => ({ principalId: a.principalId, type: a.type, role: a.role, displayName: a.displayName })), rq.principalId)) {
       if (e.code === 'maintain_rule') R.missing.push({ field: 'access', code: 'maintain_rule', message: `${e.message} Ask the user for a second maintainer (a person) or a group to add (--access <person-or-group>=maintain).` });
       else if (e.code !== 'requester_must_maintain') R.errors.push({ code: e.code, field: 'access', message: e.message });
@@ -178,7 +232,7 @@ export async function runPlan(s, input, local) {
   return finish(R, material, requester);
 }
 
-const slim = (list) => list.map((p) => ({ principalId: p.principalId, type: p.type, displayName: p.displayName, lookup: p.lookup, ...(p.email ? { email: p.email } : {}), ...(p.role ? { role: p.role } : {}) }));
+const slim = (list) => list.map((p) => ({ principalId: p.principalId, type: p.type, displayName: p.displayName, lookup: p.lookup, ...(p.email ? { email: p.email } : {}), ...(p.githubHandle ? { githubHandle: p.githubHandle } : {}), ...(p.role ? { role: p.role } : {}) }));
 
 function finish(R, material, requester, extra = {}) {
   const status = R.errors.length ? 'invalid' : R.blockers.length ? 'blocked' : R.missing.length ? 'needs_input' : material ? 'ready' : 'invalid';
@@ -327,11 +381,21 @@ export async function runStatus(s, { repo, dir }) {
   return { ok: true, found: !!hit || nameTaken === true, repo: hit ?? null, nameTaken, journal };
 }
 
-export async function runOptions(s, { org, findService, findPrincipal, purpose }) {
+export async function runOptions(s, { org, findService, findPrincipal, purpose, showTeam, graph }) {
   s.guard.setPhase('options');
   await begin(s);
   const { orgs, match } = await memberOrg(s, org);
   const out = { ok: true, organizations: orgs.map((o) => o.login) };
+  if (showTeam) {
+    if (!match) throw new SkillError('bad_args', '--show-team needs --org <an organization you belong to>.');
+    const ctx = graph ? await loadOrgContext(graph, aliasOf(s.requester.login)) : { ok: false, code: 'graph_unavailable', message: 'Microsoft Graph is not configured.' };
+    if (!ctx.ok) out.team = { available: false, reason: ctx.code, message: ctx.message };
+    else {
+      const view = async (person) => ({ displayName: person.displayName, email: person.email, githubHandle: person.githubHandle, inOrganization: !!(await findStartRightUser(s, { org: match.login, purpose: 'acl', person })) });
+      out.team = { available: true, organization: match.login, manager: await view(ctx.manager), members: [], defaultRole: DEFAULT_TEAM_ROLE, tooLarge: ctx.peers.length > TEAM_LIMIT };
+      for (const peer of ctx.peers.slice(0, TEAM_LIMIT)) out.team.members.push(await view(peer));
+    }
+  }
   if (findService) {
     const cat = await s.api('catalog');
     const r = searchCatalog(cat.body, findService);

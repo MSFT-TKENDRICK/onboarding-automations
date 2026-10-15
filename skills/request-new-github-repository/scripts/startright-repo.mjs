@@ -11,6 +11,7 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { openSession, SkillError, STARTRIGHT_URL } from './lib/client.mjs';
 import { runVerify } from './lib/verify.mjs';
+import { createGraph } from './lib/graph.mjs';
 import { normalizeInput, localCheck, runPlan, runSubmit, runStatus, runOptions, termsView } from './lib/flows.mjs';
 import { stateDir, savePlan, loadPlan, readLock, requestKey, planId } from './lib/plan-store.mjs';
 import { killAllBrowsers } from './lib/browser.mjs';
@@ -18,7 +19,7 @@ import { killAllBrowsers } from './lib/browser.mjs';
 export const HELP = `Usage:
   node startright-repo.mjs plan    [inputs] [common]   Resolve and validate a new-repository request against StartRight
                                                        (read-only), read the terms, save a plan. Never creates anything.
-  node startright-repo.mjs options [--org <org>] [--find-service <text>] [--find-principal <text>] [--purpose acl|ownership] [common]
+  node startright-repo.mjs options [--org <org>] [--find-service <text>] [--find-principal <text>] [--purpose acl|ownership] [--show-team] [common]
   node startright-repo.mjs submit  --plan <planId> --accept-terms <terms.sha> [common]
   node startright-repo.mjs status  [--repo <org>/<name>] [common]
   node startright-repo.mjs verify  [common]            Maintainers: prove the recorded API contract against the live
@@ -37,6 +38,12 @@ Inputs (plan):
   Access:
     --access <person-or-group>=<read|triage|write|maintain>   repeatable. You are added with maintain. At least one group,
                                  or two people, must have maintain. People are matched exactly (e-mail, alias, full name).
+  Manager and team defaults (read from Microsoft Graph via your signed-in Azure CLI; see references/CLI.md):
+    With no ownership given, your manager is the second direct owner (and gets maintain), and everyone else who reports to
+    your manager is added as a team member (GitHub handle <alias>_microsoft, matched in StartRight by exact e-mail).
+    --team-role <read|triage|write>   role for the default team (default write)
+    --no-default-team            do not add the people who report to your manager
+    --no-manager-owner           do not default your manager as co-owner
   --json <file|->                the same inputs as one JSON object (flags override it)
 
 Submit (creates the repository once; only after the user explicitly accepted the plan's full terms):
@@ -120,7 +127,8 @@ function parse(argv) {
       org: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' }, visibility: { type: 'string' }, classification: { type: 'string' },
       'service-tree': { type: 'string' }, 'service-tree-name': { type: 'string' }, 'direct-owner': { type: 'string', multiple: true }, access: { type: 'string', multiple: true }, json: { type: 'string' },
       plan: { type: 'string' }, 'accept-terms': { type: 'string' }, repo: { type: 'string' },
-      'find-service': { type: 'string' }, 'find-principal': { type: 'string' }, purpose: { type: 'string' },
+      'find-service': { type: 'string' }, 'find-principal': { type: 'string' }, purpose: { type: 'string' }, 'show-team': { type: 'boolean' },
+      'team-role': { type: 'string' }, 'no-default-team': { type: 'boolean' }, 'no-manager-owner': { type: 'boolean' },
       headed: { type: 'boolean' }, ephemeral: { type: 'boolean' }, browser: { type: 'string' }, verbose: { type: 'boolean' }, pretty: { type: 'boolean' }, help: { type: 'boolean', short: 'h' },
     },
   });
@@ -137,6 +145,9 @@ function readInput(v, stdinText) {
   for (const [k, val] of Object.entries(flags)) if (val !== undefined) raw[k] = val;
   if (v['direct-owner']?.length) raw.owners = v['direct-owner'];
   if (v.access?.length) raw.access = v.access;
+  if (v['team-role'] !== undefined) raw.teamRole = v['team-role'];
+  if (v['no-default-team']) raw.noDefaultTeam = true;
+  if (v['no-manager-owner']) raw.noManagerOwner = true;
   return normalizeInput(raw);
 }
 
@@ -220,9 +231,9 @@ async function execute(argv, { env = process.env, stdinText = () => readFileSync
       const res = await runStatus(s, { repo: v.repo, dir });
       return { code: v.repo && !res.found ? 2 : 0, out: { ...res, ms: ms() } };
     }
-    if (cmd === 'options') return { code: 0, out: { ...(await runOptions(s, { org: v.org, findService: v['find-service'], findPrincipal: v['find-principal'], purpose: v.purpose })), ms: ms() } };
+    if (cmd === 'options') return { code: 0, out: { ...(await runOptions(s, { org: v.org, findService: v['find-service'], findPrincipal: v['find-principal'], purpose: v.purpose, showTeam: v['show-team'], graph: createGraph({ env, log }) })), ms: ms() } };
     if (cmd === 'plan') {
-      const r = await runPlan(s, input, local);
+      const r = await runPlan(s, input, local, { graph: createGraph({ env, log }) });
       const out = { ok: r.status === 'ready', ...plansView(r), ms: ms() };
       if (r.status === 'ready') {
         const id = planId(r.material);
