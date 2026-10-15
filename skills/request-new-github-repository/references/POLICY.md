@@ -20,6 +20,10 @@ The skill automates only the path Microsoft sanctions for **non-production** rep
 - `classification` has no default. The user must say it is non-production.
 - The terms text shown in a plan is written by the skill from the eng.ms policy and the StartRight wizard's attestation (`policy.mjs`, identified by `terms.sha`). It is not a verbatim copy of a StartRight legal text. If the wizard's attestation changes, update `policy.mjs`; the sha changes and old plans stop being accepted.
 
+## Manager co-owner and default team
+
+This is a convenience of the skill, not a GiM requirement. Direct ownership needs two owners, so the requester's manager (Microsoft Graph `/me/manager`) is the default second owner, and the manager's other direct reports (`/users/{id}/directReports`) are the default team. Graph stores no GitHub handle. The skill uses the documented EMU handle `<alias>_microsoft` (GiM EMU FAQ) and adds a person only when StartRight's own principal search returns exactly one match for their e-mail in the target organization. The plan lists every defaulted person with handle and role so the user sees and can change them before accepting; no one is added silently.
+
 ## Not accessible when recording
 
 Proxima (`msft.ghe.com`) could not be opened with the recording account (Entra AADSTS 53003, Conditional Access), so the Proxima flow is guidance only and is not automated.
