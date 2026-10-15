@@ -6,6 +6,9 @@ import { LIMITS, REPO_NAME, VISIBILITIES, ROLES, isGuid } from './contract.mjs';
 export const LINKS = {
   proxima: 'https://eng.ms/docs/more/github-inside-microsoft/overview/proxima',
   gim: 'https://eng.ms/docs/more/github-inside-microsoft/overview',
+  policyService: 'https://eng.ms/docs/more/github-inside-microsoft/policies/index.html',
+  accessControl: 'https://eng.ms/docs/more/github-inside-microsoft/policies/access.html',
+  exampleRepo: 'https://github.com/gim-home/us-ss-fis-onboarding',
   startright: 'https://startright.app.prod.gitops.startclean.microsoft.com/web/emu/',
   support: 'mailto:gim@microsoft.com',
 };
@@ -60,9 +63,14 @@ export function validateRepo({ org, name, description, visibility }) {
   return errors;
 }
 
+// The Access Control policy (.github/acl/access.yml) names its roles Read, Pull, Triage, Write, Push and Maintain; pull
+// and push are the GitHub names for read and write. Admin cannot be granted by an ACL (it is requested through JIT).
+const ROLE_ALIASES = { pull: 'read', push: 'write' };
+export const isAdminRole = (text) => String(text ?? '').trim().toLowerCase() === 'admin';
 export function parseRole(text) {
   const r = String(text ?? '').trim().toLowerCase();
-  return ROLES.includes(r) ? r : null;
+  const role = ROLE_ALIASES[r] ?? r;
+  return ROLES.includes(role) ? role : null;
 }
 
 // Access rule the service enforces: at least one group, or at least two users, must hold Maintain; and the requester

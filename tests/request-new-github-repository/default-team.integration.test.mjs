@@ -7,7 +7,7 @@ import { rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { startMockStartRight, DEFAULTS } from './fixtures/mock-startright.mjs';
-import { startMockGraph, GRAPH_TOKEN, PEOPLE, gUser } from './fixtures/mock-graph.mjs';
+import { startMockGraph, GRAPH_TOKEN, PEOPLE, gUser, gGroup } from './fixtures/mock-graph.mjs';
 import { run } from '../../skills/request-new-github-repository/scripts/startright-repo.mjs';
 import { findBrowser } from '../../skills/request-new-github-repository/scripts/lib/browser.mjs';
 
@@ -152,6 +152,116 @@ describe('manager co-owner and default team', { skip, concurrency: 2, timeout: 6
     assert.equal(r.out.team.available, true);
     assert.equal(r.out.team.manager.githubHandle, 'morgan_microsoft');
     assert.deepEqual(r.out.team.members.map((m) => `${m.githubHandle}:${m.inOrganization}`), ['alex_microsoft:true', 'ghost_microsoft:false', 'sam_microsoft:true']);
+    assert.deepEqual(sc.sr.state.writes, []);
+    clean(sc);
+  }));
+});
+
+// ---------------------------------------------------------------- the default team as an Entra group
+const GRP = { good: 'cccccccc-0000-4000-8000-000000000001', partial: 'cccccccc-0000-4000-8000-000000000002', outsiders: 'cccccccc-0000-4000-8000-000000000003', nested: 'cccccccc-0000-4000-8000-000000000004' };
+const SR_GROUPS = [
+  { principalId: 'dddddddd-0000-4000-8000-000000000001', type: 'group', displayName: 'Morgan Directs', secondaryText: 'morgan-directs' },
+  { principalId: 'dddddddd-0000-4000-8000-000000000002', type: 'group', displayName: 'Partial Directs', secondaryText: 'partial-directs' },
+  { principalId: 'dddddddd-0000-4000-8000-000000000003', type: 'group', displayName: 'Morgan Direct Team', secondaryText: 'morgan-direct-team' },
+  { principalId: 'dddddddd-0000-4000-8000-000000000004', type: 'group', displayName: 'Nested Directs', secondaryText: 'nested-directs' },
+];
+const OUTSIDER = gUser('eeeeeeee-0000-4000-8000-000000000001', 'Olive Outsider', 'olive');
+const gGroups = () => [
+  gGroup(GRP.good, 'Morgan Directs', 'morgan-directs', [PEOPLE.me, PEOPLE.alex, PEOPLE.sam, PEOPLE.gina]),
+  gGroup(GRP.partial, 'Partial Directs', 'partial-directs', [PEOPLE.me, PEOPLE.alex]),
+  gGroup(GRP.outsiders, 'Morgan Direct Team', 'morgan-direct-team', [PEOPLE.me, PEOPLE.alex, OUTSIDER]),
+  gGroup(GRP.nested, 'Nested Directs', 'nested-directs', [PEOPLE.me, { '@odata.type': '#microsoft.graph.group', id: 'ffffffff-0000-4000-8000-000000000001', displayName: 'Inner' }]),
+];
+const withGroups = (extra = {}) => ({ graph: { groups: gGroups(), ...extra.graph }, startright: { principals: [...principals, ...SR_GROUPS], ...extra.startright } });
+
+describe('default team as an Entra group', { skip, concurrency: 2, timeout: 600000 }, () => {
+  it('accepts a group that holds only your manager\'s team, instead of adding people one by one', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Directs');
+    assert.equal(r.out.status, 'ready', JSON.stringify(r.out));
+    assert.deepEqual(access(r).sort(), ['Morgan Chu:maintain', 'Morgan Directs:write', 'Test User:maintain']);
+    assert.ok(r.out.defaulted.some((d) => /Morgan Directs \(group\): write/.test(d.value)));
+    assert.ok(warning(r, 'group_sync_delay'), 'a group takes 5-6 hours to reach GitHub');
+    assert.ok(!warning(r, 'team_members_unresolved'));
+    assert.equal(r.out.references.accessControl, 'https://eng.ms/docs/more/github-inside-microsoft/policies/access.html');
+    assert.equal(r.out.references.policyService, 'https://eng.ms/docs/more/github-inside-microsoft/policies/index.html');
+    assert.equal(r.out.references.exampleRepository, 'https://github.com/gim-home/us-ss-fis-onboarding');
+    assert.deepEqual(sc.sr.state.writes, []);
+    clean(sc);
+  }));
+
+  it('submits the group as a group principal with the chosen role', () => with_(withGroups(), async (sc) => {
+    const p = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Directs', '--team-role', 'push');
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    const r = await sc.cli('submit', '--plan', p.out.planId, '--accept-terms', p.out.terms.sha);
+    assert.equal(r.out.outcome, 'success', JSON.stringify(r.out));
+    const b = sc.sr.state.creates[0];
+    assert.deepEqual(b.accessControl.map((a) => `${a.principalType}:${a.permission}`).sort(), ['group:write', 'user:maintain', 'user:maintain']);
+    clean(sc);
+  }));
+
+  it('warns, but still accepts, a group that is missing some of the team', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Partial Directs');
+    assert.equal(r.out.status, 'ready', JSON.stringify(r.out));
+    assert.match(warning(r, 'team_group_partial').message, /Sam Lee.*Gina Ghost|Gina Ghost.*Sam Lee/);
+  }));
+
+  it('refuses a look-alike group that contains people who do not report to your manager', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Direct Team');
+    assert.equal(r.out.status, 'invalid');
+    const e = r.out.errors.find((x) => x.code === 'team_group_not_directs');
+    assert.ok(e, JSON.stringify(r.out));
+    assert.match(e.message, /Olive Outsider/);
+    assert.deepEqual(e.outsiders.map((o) => o.displayName), ['Olive Outsider']);
+    assert.equal(r.out.resolved, undefined, 'nothing is planned for it');
+    clean(sc);
+  }));
+
+  it('refuses a group with nested groups, which Entra SCIM does not expand', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Nested Directs');
+    assert.ok(r.out.errors.some((e) => e.code === 'team_group_not_directs' && /nested/.test(e.message)), JSON.stringify(r.out));
+  }));
+
+  it('will not vouch for a group Graph cannot find by that name and alias', () => with_(withGroups({ graph: { groups: [] } }), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Directs');
+    assert.equal(r.out.status, 'invalid');
+    assert.ok(r.out.errors.some((e) => e.code === 'team_group_unverifiable'), JSON.stringify(r.out));
+  }));
+
+  it('will not vouch for a group when Graph is unavailable', () => with_(withGroups({ graph: { status: { '/v1.0/me/manager': 403 } } }), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Directs', '--direct-owner', 'alex@contoso.com');
+    assert.equal(r.out.status, 'invalid');
+    assert.ok(r.out.errors.some((e) => e.code === 'team_group_unverifiable'), JSON.stringify(r.out));
+    assert.equal(warning(r, 'org_defaults_skipped').reason, 'graph_forbidden');
+  }));
+
+  it('asks about a group StartRight does not know and rejects combining it with --no-default-team', () => with_(withGroups(), async (sc) => {
+    const none = await sc.cli('plan', ...BASE, '--team-group', 'no-such-group');
+    assert.ok(none.out.errors.some((e) => e.code === 'person_not_found' && e.field === 'teamGroup'), JSON.stringify(none.out));
+    const bad = await sc.cli('plan', ...BASE, '--team-group', 'Morgan Directs', '--no-default-team');
+    assert.ok(bad.out.errors.some((e) => e.code === 'team_group_conflict'));
+  }));
+
+  it('does not let --team-group name a person', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--team-group', 'alex@contoso.com');
+    assert.equal(r.out.status, 'invalid');
+    assert.ok(r.out.errors.some((e) => e.code === 'person_not_found'));
+  }));
+
+  it('understands the policy\'s role names: pull and push mean read and write, and admin is refused', () => with_({}, async (sc) => {
+    const r = await sc.cli('plan', ...BASE, '--access', 'alex@contoso.com=push', '--access', 'sam@contoso.com=pull');
+    assert.ok(access(r).includes('Alex Rivera:write') && access(r).includes('Sam Lee:read'), JSON.stringify(access(r)));
+    const admin = await sc.cli('plan', ...BASE, '--access', 'alex@contoso.com=admin');
+    assert.equal(admin.out.status, 'invalid');
+    const e = admin.out.errors.find((x) => x.code === 'access_role_admin');
+    assert.ok(e && e.links.includes('https://eng.ms/docs/more/github-inside-microsoft/policies/access.html'));
+  }));
+
+  it('options --show-team lists the groups that hold your manager\'s team, flagging look-alikes', () => with_(withGroups(), async (sc) => {
+    const r = await sc.cli('options', '--org', 'contoso-eng', '--show-team');
+    assert.equal(r.code, 0, JSON.stringify(r.out));
+    const by = Object.fromEntries(r.out.team.groups.map((g) => [g.alias, g.status]));
+    assert.deepEqual(by, { 'morgan-directs': 'matches', 'partial-directs': 'partial', 'morgan-direct-team': 'has_outsiders', 'nested-directs': 'has_outsiders' });
+    assert.equal(r.out.team.references.accessControl, 'https://eng.ms/docs/more/github-inside-microsoft/policies/access.html');
     assert.deepEqual(sc.sr.state.writes, []);
     clean(sc);
   }));

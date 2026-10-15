@@ -34,10 +34,11 @@
 | `--direct-owner <person>` | The other owner (you are the second). Person = e-mail, alias or exact display name. Without any ownership flag, your manager is the other owner. |
 | `--access "<person-or-group>=<role>"` | Repeatable. Roles: `read`, `triage`, `write`, `maintain`. You are added with `maintain`. At least one group, or two people, must hold `maintain`. |
 | `--team-role <role>` | Role for the default team: `read`, `triage` or `write` (default). Never `maintain`: that would give `team_role_invalid`. |
+| `--team-group "<group>"` | Use one Entra group (its exact display name) as the default team instead of adding each person. It is accepted only if Graph shows exactly one mail-enabled group with that exact name and its alias whose direct members are all people who report to your manager (or you, or the manager); members must be explicitly typed as users. Otherwise `team_group_not_directs` or `team_group_unverifiable`. Checked at `plan` time: a group's membership can change later, as with any group. Takes `--team-role`. Cannot combine with `--no-default-team` (`team_group_conflict`). |
 | `--no-default-team` | Do not add the people who report to your manager. |
 | `--no-manager-owner` | Do not default your manager as co-owner. Ownership is then asked for (`ownership_required`). |
 | `--show-team` | `options` only: show your manager and team, their handles and whether StartRight finds each in `--org`. |
-| `--json <file\|->` | The same inputs as one JSON object (`teamRole`, `noDefaultTeam`, `noManagerOwner` for the three above); flags override it. |
+| `--json <file\|->` | The same inputs as one JSON object (`teamRole`, `teamGroup`, `noDefaultTeam`, `noManagerOwner` for the four above); flags override it. |
 
 ### Manager and default team
 
@@ -48,6 +49,15 @@ Unless you give ownership yourself, a plan reads three things from Microsoft Gra
 - Graph holds no GitHub handle, so a handle is derived as the documented EMU handle `<alias>_microsoft`. Nobody is added on that guess: each person must match exactly one StartRight person by e-mail in the organization, otherwise they are named in `team_members_unresolved`.
 - Anyone you list with `--access` keeps the role you gave them.
 - The Azure CLI must be signed in as the same person as StartRight, or the defaults are skipped (`graph_identity_mismatch`). Any Graph failure only skips the defaults, with an `org_defaults_skipped` warning whose `reason` is one of `graph_unavailable`, `graph_unauthorized`, `graph_forbidden`, `graph_failed`, `graph_identity_mismatch` or `no_manager`. Tokens are never logged or stored.
+
+### Teams and the GiM access policy
+
+Teams are defined by two GiM pages, returned in every plan and `--show-team` result as `references`: the [Policy Service](https://eng.ms/docs/more/github-inside-microsoft/policies/index.html) (`policyService`) and [Access Control](https://eng.ms/docs/more/github-inside-microsoft/policies/access.html) (`accessControl`). The example repository is <https://github.com/gim-home/us-ss-fis-onboarding> (`exampleRepository`).
+
+- Access is repository-level (`.github/acl/access.yml`): `member` is a person, `team` is an Entra group (Security, M365 or Dynamic; mail-enabled preferred; not Distribution groups; nested groups are not expanded), `role` is Read, Triage, Write or Maintain. The policy's `pull` and `push` are accepted as `read` and `write`. Admin cannot be granted (`access_role_admin`): it is requested just in time.
+- A new group only reaches GitHub after about 5-6 hours (`group_sync_delay`), while people added with `member` work at once. So the default team stays people. `--team-group` is opt-in and replaces the individual defaults.
+- A group is never accepted on its name: look-alikes ("`<Manager>Directs`" versus "`<Manager> Directs`") can hold unrelated people. It must be exactly one mail-enabled Graph group with the same alias and display name, and every direct member must be a person who reports to your manager (or your manager, or you). Groups inside it make it `team_group_not_directs`. A group that lacks some reports is accepted with `team_group_partial`.
+- `options --org <org> --show-team` lists your own groups that look like a directs group in `team.groups`, each `matches`, `partial` or `has_outsiders`. It only previews; nothing is chosen from it.
 
 Common flags: `--headed` (visible browser for sign-in), `--ephemeral`, `--browser <path>`, `--verbose`, `--pretty`.
 
@@ -67,7 +77,7 @@ Common flags: `--headed` (visible browser for sign-in), `--ephemeral`, `--browse
 
 ## Plan output
 
-`status`: `ready | needs_input | invalid | blocked`. Fields: `missing[]` (`field`, `code?`, `message`, `options?`, `candidates?`), `errors[]` (`code`, `field`, `message`, `suggestion?`, `candidates?`), `blockers[]` (`code`, `message`, `links`), `defaulted[]`, `warnings[]` (`prefer_proxima`, `secret_scan`, `propagation_delay`, `group_sync_delay`, `coarse_service_tree`, `org_defaults_skipped`, `manager_not_found`, `team_members_unresolved`), and, when ready, `planId`, `expiresAt`, `resolved`, `terms` (`sha`, `text`, `links`). `browser: "not opened"` means the checks failed locally and no browser was started.
+`status`: `ready | needs_input | invalid | blocked`. Fields: `missing[]` (`field`, `code?`, `message`, `options?`, `candidates?`), `errors[]` (`code`, `field`, `message`, `suggestion?`, `candidates?`), `blockers[]` (`code`, `message`, `links`), `defaulted[]`, `warnings[]` (`prefer_proxima`, `secret_scan`, `propagation_delay`, `group_sync_delay`, `coarse_service_tree`, `org_defaults_skipped`, `manager_not_found`, `team_members_unresolved`, `team_group_partial`), and, when ready, `planId`, `expiresAt`, `resolved`, `terms` (`sha`, `text`, `links`). `browser: "not opened"` means the checks failed locally and no browser was started.
 
 ### Plan codes
 
@@ -76,7 +86,7 @@ Common flags: `--headed` (visible browser for sign-in), `--ephemeral`, `--browse
 | `status` | `ready`, `needs_input`, `invalid`, `blocked` |
 | `blockers` | `production_not_allowed`, `not_a_member`, `service_restricted` |
 | `missing` | `ambiguous_person`, `ambiguous_service`, `second_owner`, `maintain_rule`, `ownership_required`, `default_team_too_large` (plus field-only entries for `classification`, `org`, `name`, `description`, `ownership`) |
-| `errors` | `classification_invalid`, `name_invalid`, `name_unavailable`, `org_unknown`, `person_not_found`, `service_not_found`, `service_tree_invalid`, `ownership_conflict`, `too_many_owners`, `owner_duplicate`, `requester_not_found`, `requester_must_maintain`, `access_required`, `access_role_required`, `access_role_invalid`, `access_duplicate`, `team_role_invalid` |
+| `errors` | `classification_invalid`, `name_invalid`, `name_unavailable`, `org_unknown`, `person_not_found`, `service_not_found`, `service_tree_invalid`, `ownership_conflict`, `too_many_owners`, `owner_duplicate`, `requester_not_found`, `requester_must_maintain`, `access_required`, `access_role_required`, `access_role_invalid`, `access_duplicate`, `access_role_admin`, `team_role_invalid`, `team_group_conflict`, `team_group_not_directs`, `team_group_unverifiable` |
 | `org_defaults_skipped` reasons | `graph_unavailable`, `graph_unauthorized`, `graph_forbidden`, `graph_failed`, `graph_identity_mismatch`, `no_manager` |
 | lookup failures (`ok: false`) | `forbidden`, `principal_search_failed` |
 

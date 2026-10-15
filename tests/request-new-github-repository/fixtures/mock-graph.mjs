@@ -9,6 +9,7 @@ export const GID = {
   sam: 'aaaaaaaa-0000-4000-8000-000000000004', dee: 'aaaaaaaa-0000-4000-8000-000000000005', gina: 'aaaaaaaa-0000-4000-8000-000000000006',
 };
 export const gUser = (id, name, alias, extra = {}) => ({ '@odata.type': '#microsoft.graph.user', id, displayName: name, userPrincipalName: `${alias}@contoso.com`, mail: `${alias}@contoso.com`, mailNickname: alias, accountEnabled: true, ...extra });
+export const gGroup = (id, name, nickname, members, extra = {}) => ({ '@odata.type': '#microsoft.graph.group', id, displayName: name, mail: `${nickname}@contoso.com`, mailNickname: nickname, mailEnabled: true, securityEnabled: true, groupTypes: [], members, ...extra });
 export const PEOPLE = {
   me: gUser(GID.me, 'Test User', 'testuser'),
   mgr: gUser(GID.mgr, 'Morgan Chu', 'morgan'),
@@ -19,7 +20,7 @@ export const PEOPLE = {
 };
 
 export async function startMockGraph(opts = {}) {
-  const cfg = { me: PEOPLE.me, manager: PEOPLE.mgr, reports: [PEOPLE.me, PEOPLE.alex, PEOPLE.sam, PEOPLE.dee, PEOPLE.gina], status: {}, pageSize: 100, ...opts };
+  const cfg = { me: PEOPLE.me, manager: PEOPLE.mgr, reports: [PEOPLE.me, PEOPLE.alex, PEOPLE.sam, PEOPLE.dee, PEOPLE.gina], groups: [], status: {}, pageSize: 100, ...opts };
   const state = { requests: [], violations: [] };
   const server = createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
@@ -38,6 +39,16 @@ export async function startMockGraph(opts = {}) {
       const more = skip + cfg.pageSize < cfg.reports.length;
       return send(200, { value, ...(more ? { '@odata.nextLink': `${origin()}${url.pathname}?$skip=${skip + cfg.pageSize}` } : {}) });
     }
+    const gm = url.pathname.match(/^\/v1\.0\/groups\/([^/]+)\/members$/);
+    if (gm) {
+      const g = cfg.groups.find((x) => x.id === gm[1]);
+      return g ? send(200, { value: g.members }) : send(404);
+    }
+    if (url.pathname === '/v1.0/groups') {
+      const f = /^mailNickname eq '([^']*)'$/.exec(url.searchParams.get('$filter') ?? '');
+      return send(200, { value: f ? cfg.groups.filter((g) => g.mailNickname.toLowerCase() === f[1].toLowerCase()).map(({ members, ...g }) => g) : [] });
+    }
+    if (url.pathname === '/v1.0/me/memberOf/microsoft.graph.group') return send(200, { value: cfg.groups.filter((g) => g.members.some((u) => u.id === cfg.me.id)).map(({ members, ...g }) => g) });
     return send(404);
   });
   const origin = () => `http://127.0.0.1:${server.address().port}`;
