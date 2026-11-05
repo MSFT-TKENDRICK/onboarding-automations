@@ -8,6 +8,9 @@
 | --- | --- |
 | [`request-new-azure-subscription`](skills/request-new-azure-subscription/SKILL.md) | Submits a new MCAPS, ESLabs, or internal Azure subscription request through the MCAPS Services portal and returns the support case ID. Uses a zero-dependency Node script that drives headless Edge over the DevTools protocol with your corporate SSO; see its [benchmarks](skills/request-new-azure-subscription/references/BENCHMARKS.md). |
 | [`request-new-github-repository`](skills/request-new-github-repository/SKILL.md) | Creates a new non-production GitHub EMU repository through StartRight, the sanctioned self-service path, and returns its URL. Refuses production, TCB and HVT code and points to GitHub Proxima. Contract-tested against a local mock: the live create call is never exercised by tests. |
+| [`check-github-access`](skills/check-github-access/SKILL.md) | Checks the selected GitHub identity and specified repositories, without changing access. |
+| [`check-msx-access`](skills/check-msx-access/SKILL.md) | Guides MS Sales access requests and separately checks corporate SSO and MSX tooling. |
+| [`new-hire-readiness`](skills/new-hire-readiness/SKILL.md) | Combines the GitHub and MSX checks and identifies onboarding areas that still require verification. Install both sibling checks with it. |
 
 ## Requirements
 
@@ -33,7 +36,8 @@ tests/
 
 ## Install
 
-Pick the option that matches your harness. Each skill is a self-contained directory, so you can install one or all of them.
+Pick the option that matches your harness. You can install individual skill directories or all of them. The
+`new-hire-readiness` skill also requires its sibling `check-github-access` and `check-msx-access` directories.
 
 ### Plugin marketplace (Claude Code, GitHub Copilot CLI)
 
@@ -69,7 +73,11 @@ Ask your agent in plain language, for example:
 
 > Request a new ESLabs Azure subscription for my team's demo environment.
 
+> Check my GitHub and MSX onboarding readiness for the repositories my team uses.
+
 The harness matches the request to the skill's `description`, loads `SKILL.md`, and follows its steps. Skills that change anything on your behalf always confirm with you before they submit.
+
+An MS Sales access request does not require an Azure subscription or Azure CLI sign-in.
 
 ## Validate
 
@@ -77,6 +85,9 @@ The harness matches the request to the skill's `description`, loads `SKILL.md`, 
 pip install skills-ref
 python -m skills_ref.cli validate skills/request-new-azure-subscription
 python -m skills_ref.cli validate skills/request-new-github-repository
+python -m skills_ref.cli validate skills/check-github-access
+python -m skills_ref.cli validate skills/check-msx-access
+python -m skills_ref.cli validate skills/new-hire-readiness
 npm test            # unit + end-to-end tests against local mock services (needs Edge/Chrome; skipped otherwise)
 npm run test:unit   # unit tests only
 npm run bench       # plan timings against the mock portal
