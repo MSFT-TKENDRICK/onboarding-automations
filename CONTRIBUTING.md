@@ -14,6 +14,24 @@
 6. If the skill has scripts, add tests under `tests/<skill-name>/` (`node:test`, no dependencies) and run `npm test`.
 7. Run `python -m skills_ref.cli validate skills/<skill-name>` before opening a pull request.
 
+## Quality gates
+
+- Run `npm ci` first to install the exact development dependencies recorded in `package-lock.json`.
+- Add deterministic generated/property tests for parsers, normalization, identity matching, timeout budgets,
+  sanitization, and composition invariants. Record a fixed seed so failures reproduce.
+- Add fixture-backed consumer/provider contracts for every external boundary and replay malformed, partial, denied,
+  throttled, unavailable, and changed responses. An unknown shape must never become a pass.
+- Add meaningful source mutations for safety-critical branches. `npm run test:mutation` runs sequentially, distinguishes
+  killed, survived, invalid, timed-out, and infrastructure-failed mutants, and enforces a 70% score.
+- Run `npm run test:crap`. It computes `CC² × (1 − coverage)³ + CC` per function using Acorn AST complexity and V8
+  coverage, fails above 30, and also fails when an executable module/function is unmeasured.
+- Keep tests at one worker. Always use `scripts/run-tests.mjs` so `TEMP`, `TMP`, and `TMPDIR` are isolated from shared
+  machine state. A test failure keeps its original exit code; if tests pass but the isolated root remains locked after
+  bounded cleanup, the runner reports the exact path and exits 2 instead of returning success.
+- Readiness and diagnostics must be unattended. Reuse only already-authenticated profiles/accounts verified against
+  direct identity evidence. Never start login, select an account/subscription, request MFA, or infer identity from a
+  naming convention. Missing evidence is `unknown`, and unrelated checks continue.
+
 ## Scripts
 
 - Prefer zero-dependency Node.js (>= 22) scripts that print one JSON object on stdout and use documented exit codes, so any harness can call them and parse the result.

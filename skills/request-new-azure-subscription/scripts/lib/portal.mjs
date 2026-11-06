@@ -96,7 +96,9 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
       if (cookies.length) headers.cookie = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
       const res = await fetch(request.url, { method: 'POST', headers, body, redirect: 'manual', signal: AbortSignal.timeout(commitTimeoutMs) });
       const buf = Buffer.from(await res.arrayBuffer());
-      Object.assign(ev, { status: res.status, location: res.headers.get('location') ?? null, ms: Date.now() - ev.at });
+      const location = res.headers.get('location') ?? null;
+      const responseCaseIds = submittedResponseCaseIds({ status: res.status, location, body: buf.length <= 1048576 ? buf.toString('utf8') : null });
+      Object.assign(ev, { status: res.status, location, responseCaseIds, ms: Date.now() - ev.at });
       const responseHeaders = [];
       res.headers.forEach((value, name) => { if (!['set-cookie', 'content-encoding', 'content-length', 'transfer-encoding'].includes(name)) responseHeaders.push({ name, value }); });
       for (const c of res.headers.getSetCookie?.() ?? []) responseHeaders.push({ name: 'set-cookie', value: c });
@@ -208,7 +210,7 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
       const t = setTimeout(() => reject(new SkillError('browser_unresponsive', 'The browser did not attach the page in time (machine overloaded?). Retry.')), 30000);
       attachWaiters.set(targetId, (sid) => { clearTimeout(t); resolve(sid); });
     });
-  } catch (e) { cdp.close(); await browser.close(); throw e; }
+  } catch (e) { await browser.close(); throw e; }
   mark('pageReady');
   const page = pageSession(cdp, mainSid);
 
@@ -257,9 +259,7 @@ export async function openSession({ formUrl = DEFAULT_FORM_URL, headless = true,
       const t = now();
       if (browser.persistent) {
         await persistPortalSession(cdp, formUrl, log).catch((e) => log(`session persist skipped: ${e.message}`));
-        await cdp.send('Browser.close', {}, undefined, { timeoutMs: 1500 }).catch(() => {});
       }
-      try { cdp.close(); } catch {}
       await browser.close();
       if (browser.persistent) log(`profile released (${Math.round(now() - t)}ms)`);
     },
@@ -755,9 +755,54 @@ const raceTimeout = (p, ms, v) => { let t; return Promise.race([p, new Promise((
 
 // Active requests by the signed-in user with the same title in the last 24h.
 export async function findDuplicates(s, contactId, title) {
-  const recent = await s.page.call(P.listOwnRequests, contactId, new Date(Date.now() - DAY).toISOString(), 25);
-  if (!recent.ok) return { ok: false, error: recent.error };
-  return { ok: true, rows: recent.rows.filter((x) => x.active && titleMatches(x.name, title)) };
+  if (typeof title !== 'string' || !title.trim()) return { ok: false, error: 'The request title could not be verified.' };
+  let recent;
+  try { recent = await s.page.call(P.listOwnRequests, contactId, new Date(Date.now() - DAY).toISOString(), 25, undefined, { complete: true }); }
+  catch { return { ok: false, error: 'The request list could not be read (request_list_unreachable).' }; }
+  if (!recent?.ok || recent.complete !== true || !Array.isArray(recent.rows)
+    || recent.rows.some((row) => !row || typeof row.name !== 'string' || !row.name.trim()
+      || typeof row.caseId !== 'string' || !row.caseId.trim() || typeof row.active !== 'boolean')) {
+    const reason = typeof recent?.error === 'string' && /^[a-z0-9_]{1,80}$/i.test(recent.error) ? recent.error : 'request_list_incomplete';
+    return { ok: false, error: `The request list could not be verified (${reason}).` };
+  }
+  const matching = recent.rows.filter((row) => titleMatches(row.name, title));
+  return { ok: true, rows: matching.filter((row) => row.active), previousCaseIds: matching.map((row) => row.caseId) };
+}
+
+export function reconcileRequestList(result, { title, since, previous = [] }) {
+  if (typeof title !== 'string' || !title.trim() || !Number.isFinite(since) || !Array.isArray(previous)
+    || !result?.ok || result.complete !== true || !Array.isArray(result.rows)
+    || result.rows.some((row) => !row || typeof row.name !== 'string' || !row.name.trim()
+      || typeof row.caseId !== 'string' || !row.caseId.trim()
+      || typeof row.createdOn !== 'string' || !Number.isFinite(Date.parse(row.createdOn)))) {
+    const reason = typeof result?.error === 'string' && /^[a-z0-9_]{1,80}$/i.test(result.error) ? result.error : 'request_list_incomplete';
+    return { ok: false, error: reason };
+  }
+  const hits = result.rows.filter((row) => titleMatches(row.name, title)
+    && Date.parse(row.createdOn) >= since && !previous.includes(row.caseId));
+  return { ok: true, found: hits.length === 1 ? hits[0] : null, ambiguous: hits.length > 1 ? hits : null };
+}
+
+export function submittedResponseCaseIds({ status, location, body }) {
+  if (!Number.isInteger(status) || status < 200 || status >= 400) return [];
+  const source = status >= 300 ? location : body;
+  if (typeof source !== 'string' || source.length > 1048576) return [];
+  return [...new Set(source.match(/\bREQ-\d{6}-\d{4}\b/g) ?? [])].slice(0, 2);
+}
+
+export function confirmsSubmittedCase(found, page, commit, origin) {
+  if (!found?.caseId || !page || page.hasForm !== false || page.confirmation !== true || !Array.isArray(page.caseIds)
+    || page.caseIds.length !== 1 || page.caseIds[0] !== found.caseId
+    || !/^REQ-\d{6}-\d{4}$/.test(found.caseId) || !Number.isInteger(commit?.status)
+    || commit.status < 200 || commit.status >= 400 || commit.error || !Array.isArray(commit.responseCaseIds)
+    || commit.responseCaseIds.length !== 1 || commit.responseCaseIds[0] !== found.caseId) return false;
+  try { return new URL(page.url).origin === origin; } catch { return false; }
+}
+
+export function classifyReconciliation({ found, ambiguous, lastOk, page, commit, origin }) {
+  if (confirmsSubmittedCase(found, page, commit, origin)) return 'success';
+  if (!found && !ambiguous && lastOk && commit?.status === 200 && page?.hasForm && page.errors?.length) return 'rejected';
+  return 'unknown';
 }
 
 export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeoutMs = 90000 } = {}) {
@@ -853,24 +898,24 @@ export async function submit(s, plan, { dir, allowDuplicate = false, resultTimeo
     let lastOk = false;
     let apiError = null;
     for (let i = 0; i < 8 && !found && !ambiguous; i++) {
-      const res = await s.page.call(P.listOwnRequests, r.contactId, new Date(T0 - 120000).toISOString(), 10).catch((e) => ({ ok: false, error: e.message }));
-      lastOk = !!res.ok;
-      if (res.ok) {
-        const hits = res.rows.filter((x) => titleMatches(x.name, title) && Date.parse(x.createdOn) >= T0 - 120000 && !dupes.some((d) => d.caseId === x.caseId));
-        if (hits.length === 1) found = hits[0];
-        else if (hits.length > 1) ambiguous = hits;
-      } else apiError = res.error;
+      const res = await s.page.call(P.listOwnRequests, r.contactId, new Date(T0 - 120000).toISOString(), 25, undefined, { complete: true })
+        .catch(() => ({ ok: false, error: 'request_list_unreachable' }));
+      const reconciled = reconcileRequestList(res, { title, since: T0 - 120000, previous: dup.previousCaseIds });
+      lastOk = reconciled.ok;
+      if (reconciled.ok) { found = reconciled.found; ambiguous = reconciled.ambiguous; }
+      else apiError = reconciled.error;
       if (!found && !ambiguous) await sleep(i < 2 ? 750 : 2000);
     }
-    const probable = page?.caseIds?.length === 1 ? page.caseIds[0] : null;
+    const probable = page?.caseIds?.length === 1 ? page.caseIds[0] : found?.caseId ?? null;
+    const outcome = classifyReconciliation({ found, ambiguous, lastOk, page, commit: commitEv, origin: s.origin });
     let result;
-    if (found) result = { outcome: 'success', caseId: found.caseId, status: found.status, createdOn: found.createdOn };
-    else if (!ambiguous && lastOk && commitEv?.status === 200 && page?.hasForm && page.errors?.length) result = { outcome: 'rejected', errors: page.errors, modals: pageModals };
+    if (outcome === 'success') result = { outcome, caseId: found.caseId, status: found.status, createdOn: found.createdOn };
+    else if (outcome === 'rejected') result = { outcome, errors: page.errors, modals: pageModals };
     else result = {
       outcome: 'unknown',
-      message: `The request was sent but could not be confirmed as exactly one new case. Do NOT resubmit; run status${probable ? ` --case ${probable}` : ''} in a few minutes.`,
+      message: `The request was sent but could not be tied to exactly one case. Do NOT resubmit; run status${probable ? ` --case ${probable}` : ''} in a few minutes.`,
       ...(probable ? { probableCaseId: probable } : {}),
-      ...(ambiguous ? { candidates: ambiguous.map((x) => ({ caseId: x.caseId, createdOn: x.createdOn, status: x.status })) } : {}),
+      ...(ambiguous || found ? { candidates: (ambiguous ?? [found]).map((x) => ({ caseId: x.caseId, createdOn: x.createdOn, status: x.status })) } : {}),
       page: page && { url: page.url.split('?')[0], title: page.title, excerpt: page.excerpt.slice(0, 300) }, navigation: nav, commit: commitEv && { status: commitEv.status ?? null, error: commitEv.error ?? null }, apiError,
     };
     recordOutcome(lock, { outcome: result.outcome, caseId: result.caseId ?? null, ...(probable && !result.caseId ? { probableCaseId: probable } : {}) });
@@ -908,5 +953,6 @@ export async function ownRequests(s, cachedContactId, { sinceIso, top = 10, case
   if (!id) throw new SkillError('contact_unknown', 'Could not determine your portal contact id.');
   const res = await s.page.call(P.listOwnRequests, id, sinceIso, caseId ? 1 : top, caseId);
   if (!res.ok) throw new SkillError('api_failed', `Web API query failed: ${res.error}`);
-  return { contactId: id, requests: res.rows };
+  if (caseId && !res.rows.length && !res.complete) throw new SkillError('api_failed', `Web API query was incomplete: ${res.error ?? 'request_list_incomplete'}`);
+  return { contactId: id, requests: res.rows, complete: res.complete, ...(res.error ? { incompleteReason: res.error } : {}) };
 }

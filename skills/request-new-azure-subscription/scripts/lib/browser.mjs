@@ -5,7 +5,7 @@ import { connectPipe } from './cdp.mjs';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { PREFIX, profileInUse } from './cleanup.mjs';
+import { PREFIX, profileInUse, removeWhenFree } from './cleanup.mjs';
 
 const CANDIDATES = {
   win32: [
@@ -36,20 +36,25 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 // Force-kill the whole process tree without waiting: on managed Windows machines process teardown can take
 // several seconds after termination is requested, and nothing we need lives in the throwaway profile.
-function killTree(proc) {
+function killTree(proc, log = console.error) {
   try {
-    if (process.platform === 'win32') spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, detached: true }).unref();
-    else proc.kill('SIGKILL');
-  } catch {}
+    if (process.platform === 'win32') {
+      const killer = spawn('taskkill', ['/PID', String(proc.pid), '/T', '/F'], { stdio: 'ignore', windowsHide: true, detached: true });
+      killer.once('error', (e) => log(`Could not terminate browser process tree: ${e.message}`));
+      killer.unref();
+    } else if (!proc.kill('SIGKILL')) log('Could not terminate browser process.');
+  } catch (e) { log(`Could not terminate browser process tree: ${e.message}`); }
   proc.unref();
 }
 
 const CLEANER = fileURLToPath(new URL('./cleanup.mjs', import.meta.url));
 
-// Delete the profile off the critical path: a detached helper retries until the browser has released it
-// and also sweeps stale profiles from earlier runs.
-function cleanupDetached(...args) {
-  try { spawn(process.execPath, [CLEANER, ...args], { stdio: 'ignore', windowsHide: true, detached: true }).unref(); } catch {}
+function cleanupDetached(dir, log) {
+  try {
+    const helper = spawn(process.execPath, [CLEANER, dir], { stdio: 'ignore', windowsHide: true, detached: true });
+    helper.once('error', (e) => log(`Could not start browser profile cleanup: ${e.message}`));
+    helper.unref();
+  } catch (e) { log(`Could not start browser profile cleanup: ${e.message}`); }
 }
 
 // profileDir: optional persistent profile (cookie + HTTP cache reuse across runs). Falls back to a throwaway
@@ -95,20 +100,24 @@ async function launchOnce({ browserPath = findBrowser(), headless = true, extraA
   let spawnError = null;
   proc.on('exit', () => { exited = true; live.delete(handle); });
   proc.on('error', (e) => { exited = true; spawnError = e; });
-  cleanupDetached('--sweep');
   const cdp = connectPipe(proc.stdio[3], proc.stdio[4]);
   const handle = {
     proc, cdp, userDataDir, persistent,
     get exited() { return exited; },
-    // Throwaway profile: kill immediately. Persistent profile: the caller has asked the browser to close
-    // gracefully (flushes the lazily-committed cookie store); wait briefly for the profile lock, then kill.
-    async close({ graceMs = persistent ? 3000 : 0 } = {}) {
+    async close({ graceMs = 3000 } = {}) {
+      if (!exited && !cdp.closed) {
+        try { await cdp.send('Browser.close', {}, undefined, { timeoutMs: 1500 }); }
+        catch (e) { if (!cdp.closed) log(`Graceful browser shutdown failed: ${e.message}`); }
+      }
       const until = Date.now() + graceMs;
-      while (!exited && Date.now() < until && profileInUse(userDataDir)) await sleep(25);
+      while (!exited && Date.now() < until) await sleep(25);
       cdp.close();
-      if (!exited) killTree(proc);
+      if (!exited) { log('Browser did not exit in time; terminating its process tree.'); killTree(proc, log); }
       live.delete(handle);
-      if (!persistent) cleanupDetached(userDataDir);
+      if (!persistent && !await removeWhenFree(userDataDir, { timeoutMs: 1000, intervalMs: 100 })) {
+        log('Temporary browser profile is still locked; cleanup will retry.');
+        cleanupDetached(userDataDir, log);
+      }
     },
   };
   live.add(handle);
@@ -118,9 +127,9 @@ async function launchOnce({ browserPath = findBrowser(), headless = true, extraA
     await cdp.send('Browser.getVersion', {}, undefined, { timeoutMs });
   } catch (e) {
     cdp.close();
-    killTree(proc);
+    killTree(proc, log);
     live.delete(handle);
-    if (!persistent) cleanupDetached(userDataDir);
+    if (!persistent) cleanupDetached(userDataDir, log);
     const err = new Error(spawnError ? `Browser failed to start: ${spawnError.message}` : exited || /closed/.test(e.message) ? `Browser exited during startup: ${browserPath}` : `Browser did not answer CDP in time: ${e.message}`);
     err.persistent = persistent;
     throw err;

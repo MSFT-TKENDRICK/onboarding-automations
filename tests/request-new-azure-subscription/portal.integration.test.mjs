@@ -302,11 +302,25 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
   }));
 
   for (const mode of ['error500', 'drop']) {
-    it(`reconciles the case via the API when the response is lost (${mode})`, () => with_({ submitMode: mode }, async (sc) => {
+    it(`reports the candidate as unknown when the response is lost (${mode})`, () => with_({ submitMode: mode }, async (sc) => {
       const p = await plan(sc);
       const s = await submit(sc, p);
-      assert.equal(s.out.outcome, 'success', JSON.stringify(s.out));
-      assert.equal(s.out.caseId, sc.m.state.records[0].apitil_requestnumber);
+      assert.equal(s.out.outcome, 'unknown', JSON.stringify(s.out));
+      assert.equal(s.out.probableCaseId, sc.m.state.records[0].apitil_requestnumber);
+      assert.equal(s.out.caseId, undefined);
+      assert.equal((await submit(sc, p)).out.error, 'already_submitted');
+      assert.equal(sc.m.state.submissions.length, 1);
+    }));
+  }
+
+  for (const mode of ['unrelated-page', 'generic-redirect']) {
+    it(`does not attribute a new case to a ${mode} response`, () => with_({ submitMode: mode }, async (sc) => {
+      const p = await plan(sc);
+      const s = await submit(sc, p);
+      assert.equal(s.out.outcome, 'unknown', JSON.stringify(s.out));
+      assert.equal(s.out.probableCaseId, sc.m.state.records[0].apitil_requestnumber);
+      assert.equal(s.out.caseId, undefined);
+      assert.equal((await submit(sc, p)).out.error, 'already_submitted');
       assert.equal(sc.m.state.submissions.length, 1);
     }));
   }
@@ -347,6 +361,15 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     assert.equal(sc.m.state.submissions.length, 1);
   }));
 
+  it('a malformed request list after submit cannot prove a rejection or permit retry', () => with_({ submitMode: 'reject', apiMalformedAfterPost: true }, async (sc) => {
+    const p = await plan(sc);
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'unknown', JSON.stringify(s.out));
+    assert.equal(s.code, 3);
+    assert.equal((await submit(sc, p)).out.error, 'already_submitted');
+    assert.equal(sc.m.state.submissions.length, 1);
+  }));
+
   it('a case id seen only on the confirmation page is unknown, not success', () => with_({ hideCreated: true }, async (sc) => {
     const p = await plan(sc);
     const s = await submit(sc, p);
@@ -355,6 +378,26 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     assert.equal(s.out.caseId, undefined);
     assert.equal((await submit(sc, p)).out.error, 'already_submitted');
     assert.equal(sc.m.state.submissions.length, 1);
+  }));
+
+  it('does not mistake an earlier closed case for the newly submitted request', () => with_({
+    hideCreated: true,
+    records: [{
+      apitil_servicerequestid: 'closed-request',
+      apitil_requestnumber: 'REQ-100001-2026',
+      apitil_name: 'REQ-100001-2026 - IT lab',
+      statuscode: 2,
+      statecode: 1,
+      createdon: new Date().toISOString(),
+      _apitil_contact_value: DEFAULTS.me.contactId,
+    }],
+  }, async (sc) => {
+    const p = await plan(sc);
+    const s = await submit(sc, p);
+    assert.equal(s.out.outcome, 'unknown', JSON.stringify(s.out));
+    assert.equal(s.out.caseId, undefined);
+    assert.equal(sc.m.state.submissions.length, 1);
+    assert.equal((await submit(sc, p)).out.error, 'already_submitted');
   }));
 
   it('blocks the POST when page script changes a verified value at submit time', () => with_({ tamperOwner: '22222222-2222-4222-8222-222222222222' }, async (sc) => {
@@ -418,6 +461,27 @@ describe('mcaps-subscription CLI against the mock portal', { skip, concurrency: 
     const forced = await submit(sc, p, p.out.terms.sha, ['--allow-duplicate']);
     assert.equal(forced.out.outcome, 'success', JSON.stringify(forced.out));
     assert.notEqual(forced.out.caseId, 'REQ-100001-2026');
+  }));
+
+  it('finds an active duplicate beyond the first request page and does not submit', () => with_({
+    requestPageSize: 1,
+    records: ['Another lab', 'Different lab', 'IT lab'].map((title, i) => ({
+      apitil_servicerequestid: `request-${i}`,
+      apitil_requestnumber: `REQ-10000${i}-2026`,
+      apitil_name: `REQ-10000${i}-2026 - ${title}`,
+      statuscode: 1,
+      statecode: 0,
+      createdon: new Date().toISOString(),
+      _apitil_contact_value: DEFAULTS.me.contactId,
+    })),
+  }, async (sc) => {
+    const p = await plan(sc);
+    assert.equal(p.out.status, 'ready', JSON.stringify(p.out));
+    assert.ok(p.out.warnings.some((w) => w.code === 'possible_duplicate'
+      && w.requests.some((r) => r.caseId === 'REQ-100002-2026')), JSON.stringify(p.out.warnings));
+    const s = await submit(sc, p);
+    assert.equal(s.out.reason, 'duplicate_active', JSON.stringify(s.out));
+    assert.equal(sc.m.state.submissions.length, 0);
   }));
 });
 

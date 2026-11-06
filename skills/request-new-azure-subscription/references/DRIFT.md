@@ -48,7 +48,7 @@ System One must not:
 - Bind a field, make a plan ready by itself, or report a field absent.
 - Touch `owner`, the manager, `allowance`, `type`, `title`, `tenantName` or any default.
 
-Every failure (disabled, timeout, HTTP error, malformed or inconsistent answer) is treated as no answer: the plan result is the deterministic one. A refused endpoint adds a `systemone_refused` warning.
+Every failure (disabled, timeout, HTTP error, malformed or inconsistent answer) is treated as no answer: the plan result is the deterministic one. Confidence and margin must be finite numbers in `[0, 1]`, and a margin cannot exceed the leading probability. A refused endpoint adds a `systemone_refused` warning.
 
 ## Privacy
 

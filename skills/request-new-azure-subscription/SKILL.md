@@ -94,7 +94,7 @@ If any entry below says stop, stop after reporting all entries.
 | `success` | Report `caseId` and `status`. Done. |
 | `rejected` | Nothing was created. Show the portal's `errors` verbatim. Fix them with the user, then re-plan. |
 | `not_submitted` | Nothing was sent. Act on `reason` below. |
-| `unknown` | The request may exist. **Never resubmit**, even if the user asks. Show `probableCaseId` and `candidates` when present. With `probableCaseId`, run `status --case <probableCaseId>`: `found: true` confirms it, so report its `caseId`. Otherwise run `status` after a few minutes. If no single new request shows up, say the outcome is still unknown and stop. |
+| `unknown` | The request may exist. **Never resubmit**, even if the user asks. Show `probableCaseId` and `candidates` when present. With `probableCaseId`, run `status --case <probableCaseId>`: `found: true` confirms the case exists, not which submission created it. Otherwise run `status` after a few minutes. If the case cannot be tied to this submission, say the outcome is still unknown and stop. |
 
 | `not_submitted` `reason` | Do this |
 |---|---|

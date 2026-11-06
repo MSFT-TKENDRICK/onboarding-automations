@@ -1,9 +1,6 @@
-// Out-of-process profile cleanup, never on the CLI's critical path. A killed browser may hold its files for
-// several seconds (EDR/AV on managed Windows machines), and harnesses may kill all descendants when the CLI
-// exits (Windows job objects). So: at launch a low-priority sweeper removes earlier runs' profiles that are
-// provably unused while this run works; at close a best-effort helper retries removing this run's profile.
-import { existsSync, readdirSync, readlinkSync, rmSync, statSync } from 'node:fs';
-import { tmpdir, setPriority } from 'node:os';
+// A browser may hold its profile briefly after closing. Only the exact profile created by this run is removed.
+import { existsSync, readlinkSync, rmSync } from 'node:fs';
+import { setPriority } from 'node:os';
 import { join, basename } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
@@ -22,18 +19,6 @@ export function profileInUse(dir) {
   } catch { return false; }
 }
 
-export function sweepStaleProfiles({ root = tmpdir(), maxAgeMs = 60 * 60 * 1000, limit = 10 } = {}) {
-  let removed = 0;
-  for (const name of readdirSync(root)) {
-    if (!name.startsWith(PREFIX) || removed >= limit) continue;
-    const dir = join(root, name);
-    try {
-      if (Date.now() - statSync(dir).mtimeMs > maxAgeMs && !profileInUse(dir)) { rmSync(dir, { recursive: true, force: true }); removed++; }
-    } catch {}
-  }
-  return removed;
-}
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function removeWhenFree(dir, { timeoutMs = 120000, intervalMs = 1000 } = {}) {
@@ -45,11 +30,13 @@ export async function removeWhenFree(dir, { timeoutMs = 120000, intervalMs = 100
   return !existsSync(dir);
 }
 
-// node cleanup.mjs [--sweep] [profileDir]
+// node cleanup.mjs profileDir
 if (import.meta.url === pathToFileURL(process.argv[1] ?? '').href) {
   const args = process.argv.slice(2);
   try { setPriority(19); } catch {}
-  const dir = args.find((a) => !a.startsWith('--'));
-  if (args.includes('--sweep')) { try { sweepStaleProfiles({ maxAgeMs: 2 * 60 * 1000, limit: 25 }); } catch {} }
-  if (dir) await removeWhenFree(dir).catch(() => {});
+  if (args.length !== 1 || args[0].startsWith('--')) throw new Error('Expected exactly one throwaway profile directory.');
+  if (!await removeWhenFree(args[0])) {
+    console.error(`Could not remove the temporary browser profile: ${args[0]}`);
+    process.exitCode = 1;
+  }
 }

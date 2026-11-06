@@ -1,0 +1,55 @@
+{
+  "github": {
+    "user": { "login": "alex_microsoft" },
+    "repository": {
+      "full_name": "example/project",
+      "permissions": { "pull": true, "triage": true, "push": false, "maintain": false, "admin": false }
+    },
+    "errors": [
+      { "code": "http_403", "expected": "action" },
+      { "code": "http_404", "expected": "action" },
+      { "code": "http_429", "expected": "unknown" },
+      { "code": "http_5xx", "expected": "unknown" }
+    ]
+  },
+  "azure": {
+    "tenant": "72f988bf-86f1-41af-91ab-2d7cd011db47",
+    "objectId": "11111111-2222-3333-4444-555555555555",
+    "whoAmI": { "UserId": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
+  },
+  "msx": {
+    "initialize": { "protocolVersion": "2025-03-26", "capabilities": {} },
+    "tool": {
+      "name": "msx_auth_status",
+      "annotations": { "readOnlyHint": true, "destructiveHint": false }
+    },
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "**Azure CLI:** Signed in\n**Dataverse token:** Valid\n**Dataverse:** Connected\n**All checks passed!**"
+        }
+      ]
+    }
+  },
+  "readiness": {
+    "schemaVersion": 1,
+    "kinds": ["github", "msx", "new-hire-readiness"],
+    "statuses": ["pass", "action", "unknown", "error"],
+    "requiredCheckFields": ["id", "status", "message"]
+  },
+  "startright": {
+    "created": {
+      "organization": "example",
+      "name": "project",
+      "webUrl": "https://github.com/example/project",
+      "id": "repository-id"
+    },
+    "rateLimited": {
+      "status": 429,
+      "title": "Rate limited",
+      "correlationId": "fixture-correlation",
+      "retryable": true
+    }
+  }
+}

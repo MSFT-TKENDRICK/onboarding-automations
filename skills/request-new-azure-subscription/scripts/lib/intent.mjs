@@ -23,10 +23,15 @@ export function optionCriteria(options, redact) {
 }
 
 export function decideIntent(answer, keyToValue) {
-  if (!answer?.ok) return { commit: false, reason: 'no_answer' };
+  if (answer?.ok !== true) return { commit: false, reason: 'no_answer' };
   if (answer.choice === 'none') return { commit: false, reason: 'none' };
   if (!Object.hasOwn(keyToValue, answer.choice)) return { commit: false, reason: 'unknown_key' };
+  if (!Number.isFinite(answer.p) || answer.p < 0 || answer.p > 1
+    || !Number.isFinite(answer.margin) || answer.margin < 0 || answer.margin > 1) {
+    return { commit: false, reason: 'invalid_answer' };
+  }
   if (!(answer.p >= COMMIT_P)) return { commit: false, reason: 'low_confidence', p: answer.p };
+  if (answer.margin > answer.p) return { commit: false, reason: 'invalid_answer' };
   if (!(answer.margin >= COMMIT_MARGIN)) return { commit: false, reason: 'narrow_margin', p: answer.p };
   return { commit: true, value: keyToValue[answer.choice], p: answer.p };
 }

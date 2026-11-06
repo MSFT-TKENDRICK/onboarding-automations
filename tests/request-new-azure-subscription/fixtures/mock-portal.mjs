@@ -34,6 +34,8 @@ export const DEFAULTS = {
   tamperOwner: null, // page script swaps the owner GUID when the form is serialized
   hideCreated: false, // created requests never show up in the Web API (confirmation page only)
   apiFailAfterPost: false, // the Web API errors once a form POST has been received
+  apiMalformedAfterPost: false,
+  requestPageSize: null,
   apiDelayMs: 80,
   termsText: 'You acknowledge that: access is monitored. Microsoft prohibits customer data in non-production subscriptions. I agree to the Terms and Conditions.',
   // undefined: the signed-in user; null: Portal exposes no User; an object: exactly that User.
@@ -323,10 +325,19 @@ export async function startMockPortal(overrides = {}) {
       const owner = f.match(/adx_identity_username eq '([^']+)'/);
       if (owner) return json(res, { value: activeFor(owner[1], f.match(/desitsm_subscriptiontypes eq (\d+)/)?.[1]) });
       if (cfg.apiFailAfterPost && state.submissions.length) return json(res, { error: { message: 'service unavailable' } }, 503);
+      if (cfg.apiMalformedAfterPost && state.submissions.length) return json(res, { value: null });
       const contact = f.match(/_apitil_contact_value eq ([0-9a-f-]{36})/);
       const num = f.match(/apitil_requestnumber eq '([^']+)'/);
       const top = Number(u.searchParams.get('$top')) || 5000;
-      return json(res, { value: state.records.filter((r) => (!contact || r._apitil_contact_value === contact[1]) && (!num || r.apitil_requestnumber === num[1]) && !(cfg.hideCreated && r._fields)).slice(0, top).map(({ _fields, ...r }) => r) });
+      const records = state.records.filter((r) => (!contact || r._apitil_contact_value === contact[1]) && (!num || r.apitil_requestnumber === num[1]) && !(cfg.hideCreated && r._fields)).slice(0, top);
+      const offset = Number(u.searchParams.get('$skiptoken')) || 0;
+      const end = Math.min(offset + (cfg.requestPageSize || top), records.length);
+      const value = records.slice(offset, end).map(({ _fields, ...r }) => r);
+      if (end < records.length) {
+        u.searchParams.set('$skiptoken', String(end));
+        return json(res, { value, '@odata.nextLink': `${u.pathname}${u.search}` });
+      }
+      return json(res, { value });
     }
     if (u.pathname === '/' && req.method === 'GET') return html(res, `<html><body><script>window.Microsoft={Dynamic365:{Portal:${JSON.stringify(portalOf(cfg))}}};</script>Home</body></html>`);
     if (u.pathname === FORM_PATH && u.searchParams.get('ServiceId') === SERVICE) {
@@ -349,10 +360,13 @@ export async function startMockPortal(overrides = {}) {
         state.records.unshift({ apitil_servicerequestid: randomUUID(), apitil_requestnumber: num, apitil_name: `${num} - ${fields.apitil_title}`, statuscode: 345550000, 'statuscode@OData.Community.Display.V1.FormattedValue': 'Awaiting Approval', statecode: 0, createdon: new Date().toISOString(), _apitil_contact_value: cfg.me.contactId, _fields: fields });
         if (cfg.submitMode === 'error500') return html(res, '<h1>Server Error</h1>', 500);
         if (cfg.submitMode === 'drop') { req.socket.destroy(); return; }
+        if (cfg.submitMode === 'unrelated-page') { res.writeHead(302, { location: `/support/recent/?num=${num}` }); return res.end(); }
+        if (cfg.submitMode === 'generic-redirect') { res.writeHead(302, { location: `/support/request/?id=${randomInt(1e6)}` }); return res.end(); }
         res.writeHead(302, { location: `/support/request/?id=${randomInt(1e6)}&num=${num}` }); return res.end();
       }
     }
-    if (u.pathname === '/support/request/') return html(res, `<html><body><h1>Thank you</h1><p>Your request ${u.searchParams.get('num')} has been submitted.</p></body></html>`);
+    if (u.pathname === '/support/recent/') return html(res, `<html><body><h1>Recent requests</h1><p>${u.searchParams.get('num')}</p></body></html>`);
+    if (u.pathname === '/support/request/') return html(res, `<html><body><h1>Thank you</h1><p>Your request ${u.searchParams.get('num') ?? state.records[0]?.apitil_requestnumber} has been submitted.</p></body></html>`);
     html(res, 'not found', 404);
   });
   await new Promise((r) => server.listen(0, '127.0.0.1', r));

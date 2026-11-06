@@ -385,21 +385,80 @@ export function parseOutcome() {
     if (m && getComputedStyle(v).display !== 'none' && getComputedStyle(v).visibility !== 'hidden' && !errors.some((e) => e.message === m)) errors.push({ field: v.getAttribute('controltovalidate') || null, message: m });
   }
   if (summary && !errors.length) errors.push({ field: null, message: summary });
-  return { url: location.href, title: document.title, caseIds: ids, validationSummary: summary, errors, hasForm: !!document.getElementById('liquid_form'), excerpt: body.slice(0, 600) };
+  const confirmation = /\brequest\b.{0,120}\b(?:submitted|created|received)\b/i.test(body)
+    || /\b(?:submitted|created|received)\b.{0,120}\brequest\b/i.test(body);
+  return { url: location.href, title: document.title, caseIds: ids, confirmation, validationSummary: summary, errors, hasForm: !!document.getElementById('liquid_form'), excerpt: body.slice(0, 600) };
 }
 
 // Own service requests via the Power Pages Web API (session cookie). Filtered by the caller's contact id.
-export async function listOwnRequests(contactId, sinceIso, top, caseId) {
-  if (!/^[0-9a-f-]{36}$/i.test(contactId || '')) return { ok: false, error: 'bad_contact' };
+export async function listOwnRequests(contactId, sinceIso, top = 10, caseId, { complete = false } = {}) {
+  if (!/^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i.test(contactId || '')) return { ok: false, error: 'bad_contact' };
   if (caseId && !/^REQ-\d{6}-\d{4}$/.test(caseId)) return { ok: false, error: 'bad_case' };
+  if (!Number.isInteger(top) || top < 1 || top > 100) return { ok: false, error: 'bad_limit' };
+  if (sinceIso && (typeof sinceIso !== 'string' || !/^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$/.test(sinceIso) || !Number.isFinite(Date.parse(sinceIso)))) return { ok: false, error: 'bad_since' };
   const filter = `_apitil_serviceid_value eq 78b2e66c-42f2-e811-a96a-000d3a30da4f and _apitil_contact_value eq ${contactId}${sinceIso ? ` and createdon ge ${sinceIso}` : ''}${caseId ? ` and apitil_requestnumber eq '${caseId}'` : ''}`;
-  const q = `$select=apitil_name,statuscode,statecode,apitil_requestnumber,createdon,apitil_servicerequestid&$filter=${filter}&$orderby=createdon desc&$top=${top || 10}`;
-  try {
-    const r = await fetch(`/_api/apitil_servicerequests?${encodeURI(q)}`, { headers: { Accept: 'application/json', Prefer: 'odata.include-annotations="OData.Community.Display.V1.FormattedValue"' }, credentials: 'same-origin' });
-    const j = await r.json().catch(() => ({}));
-    if (!r.ok) return { ok: false, status: r.status, error: j?.error?.message || r.statusText };
-    return { ok: true, rows: (j.value || []).map((v) => ({ caseId: v.apitil_requestnumber, name: v.apitil_name, status: v['statuscode@OData.Community.Display.V1.FormattedValue'] || String(v.statuscode), active: v.statecode === 0, createdOn: v.createdon, id: v.apitil_servicerequestid })) };
-  } catch (e) {
-    return { ok: false, error: String(e.message || e) };
+  const select = 'apitil_name,statuscode,statecode,apitil_requestnumber,createdon,apitil_servicerequestid';
+  const q = `$select=${select}&$filter=${filter}&$orderby=createdon desc${complete ? '' : `&$top=${top}`}`;
+  const initial = new URL(`/_api/apitil_servicerequests?${encodeURI(q)}`, location.origin);
+  const visited = new Set([initial.href]);
+  const rows = [];
+  const ids = new Set();
+  const cases = new Set();
+  let url = initial.href;
+  let malformed = false;
+  let seen = 0;
+  const incomplete = (error) => ({ ok: true, rows, complete: false, error });
+  const failed = (error) => rows.length ? incomplete(error) : { ok: false, error };
+  const text = (value) => typeof value === 'string' && value.trim().length > 0;
+
+  for (let page = 0; page < 8; page++) {
+    let response;
+    try {
+      response = await fetch(url, {
+        headers: { Accept: 'application/json', Prefer: `odata.include-annotations="OData.Community.Display.V1.FormattedValue", odata.maxpagesize=${top}` },
+        credentials: 'same-origin',
+        redirect: 'error',
+        signal: AbortSignal.timeout(5000),
+      });
+    } catch {
+      return failed('request_list_unreachable');
+    }
+    if (!response.ok) return failed(`request_list_http_${Number.isInteger(response.status) ? response.status : 'unknown'}`);
+    let data;
+    try { data = await response.json(); } catch { return failed('request_list_invalid_json'); }
+    if (!data || typeof data !== 'object' || !Array.isArray(data.value)) return failed('request_list_invalid_response');
+    for (const v of data.value) {
+      if (++seen > 200) return incomplete('request_list_limit');
+      const status = text(v?.['statuscode@OData.Community.Display.V1.FormattedValue'])
+        ? v['statuscode@OData.Community.Display.V1.FormattedValue']
+        : Number.isInteger(v?.statuscode) ? String(v.statuscode) : null;
+      if (!v || typeof v !== 'object' || !text(v.apitil_servicerequestid) || !text(v.apitil_requestnumber)
+        || !text(v.apitil_name) || ![0, 1].includes(v.statecode) || !status
+        || !text(v.createdon) || !Number.isFinite(Date.parse(v.createdon))
+        || (caseId && v.apitil_requestnumber !== caseId)
+        || ids.has(v.apitil_servicerequestid) || cases.has(v.apitil_requestnumber)) {
+        malformed = true;
+        continue;
+      }
+      ids.add(v.apitil_servicerequestid);
+      cases.add(v.apitil_requestnumber);
+      rows.push({ caseId: v.apitil_requestnumber, name: v.apitil_name, status, active: v.statecode === 0, createdOn: v.createdon, id: v.apitil_servicerequestid });
+    }
+    const hasNext = Object.hasOwn(data, '@odata.nextLink');
+    if (hasNext && (typeof data['@odata.nextLink'] !== 'string' || !data['@odata.nextLink'].trim())) return incomplete('request_list_invalid_continuation');
+    if (malformed) return incomplete('request_list_invalid_record');
+    if (!complete) return { ok: true, rows, complete: !hasNext && data.value.length < top };
+    if (!hasNext) return { ok: true, rows, complete: true };
+    if (page === 7) return incomplete('request_list_page_limit');
+    let next;
+    try { next = new URL(data['@odata.nextLink'], initial); } catch { return incomplete('request_list_invalid_continuation'); }
+    if (next.origin !== initial.origin || next.username || next.password || next.hash || next.pathname !== initial.pathname
+      || ['$select', '$filter', '$orderby'].some((key) => next.searchParams.getAll(key).length !== 1)
+      || next.searchParams.get('$select') !== select || next.searchParams.get('$filter') !== filter
+      || next.searchParams.get('$orderby') !== 'createdon desc' || next.searchParams.has('$top')
+      || visited.has(next.href)) return incomplete('request_list_invalid_continuation');
+    visited.add(next.href);
+    url = next.href;
   }
+  return incomplete('request_list_page_limit');
 }
