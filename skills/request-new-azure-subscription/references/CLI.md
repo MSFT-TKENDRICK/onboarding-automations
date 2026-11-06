@@ -118,12 +118,15 @@ Only these and the common flags are accepted. Any `--purpose` or `--type` run ex
 | `caseId`, `status`, `createdOn` | `success` only: the new request as the Web API shows it. |
 | `errors`, `modals` | `rejected` only: the portal's field errors `[{ field, message }]` and dialogs. |
 | `reason`, `message` | `not_submitted`: why nothing was sent, plus details (`changes`, `fields`, `failures`, `requests`, `missing`, `errors`, `blockers`). |
-| `probableCaseId`, `candidates` | `unknown` only, when seen: a case id shown only on the response page, or several matching requests. |
+| `probableCaseId`, `candidates` | `unknown` only, when seen: a case shown on the response page or matching the request history, without proof it came from this submission. |
 | `requestKey`, `timings` | Journal key and performance data. |
 
 ### `status`
 
-`{ ok, requests: [{ caseId, name, status, active, createdOn, id }] }`. With `--case`, also `found` (`false` means exit 2).
+`{ ok, requests: [{ caseId, name, status, active, createdOn, id }], complete, incompleteReason? }`.
+The default 10-result view can be incomplete. `incompleteReason` identifies an unreadable or malformed
+part of the list. With `--case`, `found: false` (exit 2) is returned only when the lookup was complete;
+otherwise the command reports an error instead of claiming the case is absent.
 
 ### `verify`
 
@@ -189,7 +192,7 @@ A blocker can't be fixed by changing flags; report it.
 |---|---|
 | `field_remapped` | A named input was bound to a different control than expected: `{ field, expectedId, id, label, via }`. `via` is `renamed` (same label, new id), `mapped` (the user's `--map`) or `validator` (proven by the portal's own required-field validator; `evidence.message`). |
 | `possible_duplicate` | You have an active request with this title from the last 24 h (`requests`). `submit` refuses it unless `--allow-duplicate`. |
-| `duplicate_check_failed` | The duplicate check failed; `submit` checks again. |
+| `duplicate_check_failed` | The duplicate check failed or the request history was incomplete; `submit` checks again. |
 | `portal_note` | An informational portal dialog (`title`, `message`). |
 | `portal_check_pending` | A portal access check had not finished; `submit` checks again. |
 | `input_ignored` | A value does not apply to the selected type (for example tenant fields on internal). |
@@ -199,12 +202,13 @@ A blocker can't be fixed by changing flags; report it.
 
 | `outcome` | Exit | Meaning |
 |---|---|---|
-| `success` | 0 | Exactly one new request with this title appeared in your requests after the POST. |
+| `success` | 0 | Exactly one new request with this title appeared in a complete request history, and the same case ID appeared in the successful POST response and on the confirmation page. |
 | `rejected` | 2 | The POST returned 200, the portal re-rendered the form with `errors`, and the Web API shows no new request. Nothing was created; a corrected plan may be submitted. |
 | `not_submitted` | 2 | Nothing reached the portal (see `reason`). The same plan may be submitted again. |
 | `unknown` | 3 | The POST was sent but exactly one new request could not be proven. Never resubmit; the journal refuses it anyway. |
 
-A request was created only when `outcome` is `success` and `caseId` is present, or `status` shows it.
+A request was created only when `outcome` is `success` and `caseId` is present. `status` can confirm that a
+candidate case exists, but not that this submission created it.
 
 ### `not_submitted` reasons
 
@@ -215,7 +219,7 @@ A request was created only when `outcome` is `success` and `caseId` is present, 
 | `form_changed` | A verified value changed before the click, a bound control no longer posts exactly once under its planned name, or a file upload appeared (`fields`). |
 | `submit_body_mismatch` | The browser tried to post other values or fields than those verified; the POST was blocked (`fields`, names only). |
 | `duplicate_active` | You have an active request with this title from the last 24 h (`requests`). |
-| `duplicate_check_failed` | The duplicate check failed. |
+| `duplicate_check_failed` | The duplicate check failed or the request history was incomplete; nothing was sent, even with `--allow-duplicate`. |
 | `terms_ui_failed` | The terms checkbox could not be set. |
 | `validation_failed` | The portal's client-side validation failed (`failures`). |
 | `submit_contract_changed` | The submit button no longer posts back the way the driver expects. |

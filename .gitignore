@@ -3,3 +3,5 @@
 cookies.txt
 cookie-jar*
 .skill-work/
+quality-reports/
+node_modules/

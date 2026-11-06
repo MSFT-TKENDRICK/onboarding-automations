@@ -4,10 +4,15 @@ import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const VALID_STATUS = new Set(['pass', 'action', 'unknown', 'error']);
+const SAFE_ERROR_CODES = new Set(['EACCES', 'ECONNREFUSED', 'ECONNRESET', 'ENOENT', 'ENOTDIR',
+  'ENOTFOUND', 'EPERM', 'EPIPE', 'ETIMEDOUT', 'ERR_MODULE_NOT_FOUND']);
 const defaultLoaders = {
   github: () => import('../../check-github-access/scripts/github-access.mjs'),
   msx: () => import('../../check-msx-access/scripts/msx-access.mjs'),
 };
+function safeCode(error, fallback) {
+  return typeof error?.code === 'string' && SAFE_ERROR_CODES.has(error.code) ? error.code : fallback;
+}
 
 function check(id, status, message, next, details = {}) {
   return { id, status, message, ...(next ? { next } : {}), ...details };
@@ -19,7 +24,7 @@ async function runPart(kind, options, loader) {
     module = await loader();
   } catch (error) {
     return [check(`${kind}.integration`, 'error', `The ${kind} check could not be loaded.`,
-      `Ensure the ${kind} skill is installed and retry.`, { code: error.code ?? 'load_failed' })];
+      `Ensure the ${kind} skill is installed and retry.`, { code: safeCode(error, 'load_failed') })];
   }
   try {
     const result = await module.diagnose(options);
@@ -32,8 +37,8 @@ async function runPart(kind, options, loader) {
     }
     return result.checks;
   } catch (error) {
-    return [check(`${kind}.integration`, 'error', `The ${kind} check failed: ${error.message}`,
-      'Correct the reported problem and retry.', { code: error.code ?? 'check_failed' })];
+    return [check(`${kind}.integration`, 'error', `The ${kind} check failed without a compatible result.`,
+      'Correct the reported problem and retry.', { code: safeCode(error, 'check_failed') })];
   }
 }
 
@@ -41,7 +46,7 @@ export async function diagnose(options = {}, loaders = defaultLoaders) {
   const { account, orgs = [], repos = [], role, root, server, profile, ssoUserId, timeoutMs } = options;
   const [github, msx] = await Promise.all([
     runPart('github', { account, orgs, repos, role }, loaders.github),
-    runPart('msx', { root, server, profile, ssoUserId, timeoutMs }, loaders.msx),
+    runPart('msx', { root, server, profile, ssoUserId, timeoutMs, requireIdentity: true }, loaders.msx),
   ]);
   const checks = [
     ...github,

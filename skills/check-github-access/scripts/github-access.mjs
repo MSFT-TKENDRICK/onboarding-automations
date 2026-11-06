@@ -21,8 +21,8 @@ export function runGh(args, env = process.env) {
     return { ok: false, code: result.error.code ?? 'command_failed' };
   }
   if (result.status !== 0) {
-    const match = (result.stderr ?? '').match(/(?:HTTP\s+|^)(401|403|404|429)\b/m);
-    return { ok: false, code: match ? `http_${match[1]}` : 'command_failed' };
+    const match = (result.stderr ?? '').match(/(?:HTTP\s+|^)(401|403|404|429|5\d\d)\b/m);
+    return { ok: false, code: match ? (/^5/.test(match[1]) ? 'http_5xx' : `http_${match[1]}`) : 'command_failed' };
   }
   return { ok: true, text: result.stdout };
 }
@@ -67,24 +67,22 @@ export function diagnose({ account, orgs = [], repos = [], role = 'read', run = 
   if (repos.some((repo) => !REPO.test(repo))) throw new Error('Each repository must be owner/name on github.com.');
 
   const checks = [];
-  let ghEnv = { ...env, GH_HOST: 'github.com' };
-  if (account) {
-    const token = run(['auth', 'token', '--hostname', 'github.com', '--user', account], ghEnv);
-    if (!token.ok || !token.text?.trim()) {
-      const missingCli = token.code === 'ENOENT';
-      const timedOut = token.code === 'ETIMEDOUT';
-      checks.push(check('github.authentication', missingCli ? 'error' : timedOut ? 'unknown' : 'action',
-        missingCli ? 'The GitHub CLI could not be found.'
-          : timedOut ? 'The selected GitHub account could not be checked before the timeout.'
-            : 'The selected GitHub account is not available to gh.',
-        missingCli ? 'Install the GitHub CLI using your organization’s approved process.'
-          : timedOut ? 'Check the GitHub CLI and retry.'
-            : 'Sign in with gh auth login, then retry with the intended account.',
-        token.code ? { code: token.code } : {}));
-      return { schemaVersion: 1, kind: 'github', status: summarize(checks), checks };
-    }
-    ghEnv = { ...ghEnv, GH_TOKEN: token.text.trim() };
+  if (!account) {
+    checks.push(check('github.authentication', 'unknown',
+      'No exact cached GitHub account was supplied for identity verification.',
+      'A future readiness check can use an authorized exact cached GitHub identity; it does not start sign-in or choose an account.'));
+    return { schemaVersion: 1, kind: 'github', status: summarize(checks), checks };
   }
+  let ghEnv = { ...env, GH_HOST: 'github.com' };
+  const token = run(['auth', 'token', '--hostname', 'github.com', '--user', account], ghEnv);
+  if (!token.ok || !token.text?.trim()) {
+    checks.push(check('github.authentication', 'unknown',
+      'The exact GitHub account was not available as an already-authenticated gh profile.',
+      'Verify the intended cached account outside this readiness run; readiness does not start sign-in or select another account.',
+      token.code ? { code: token.code } : {}));
+    return { schemaVersion: 1, kind: 'github', status: summarize(checks), checks };
+  }
+  ghEnv = { ...ghEnv, GH_TOKEN: token.text.trim() };
 
   const user = parseJson(run(['api', '--hostname', 'github.com', 'user'], ghEnv));
   if (!user.ok || typeof user.value?.login !== 'string' || !ACCOUNT.test(user.value.login)) {
@@ -94,12 +92,12 @@ export function diagnose({ account, orgs = [], repos = [], role = 'read', run = 
     return { schemaVersion: 1, kind: 'github', status: summarize(checks), checks };
   }
   const login = user.value.login;
-  if (account && login.toLowerCase() !== account.toLowerCase()) {
+  if (login.toLowerCase() !== account.toLowerCase()) {
     checks.push(check('github.authentication', 'error', 'The authenticated account does not match the requested account.',
       'Resolve the conflicting GitHub credentials before checking repository access.'));
     return { schemaVersion: 1, kind: 'github', status: summarize(checks), checks };
   }
-  checks.push(check('github.authentication', 'pass', 'GitHub authentication is working.', null, { account: login }));
+  checks.push(check('github.authentication', 'pass', 'GitHub authentication is working.'));
   checks.push(login.toLowerCase().endsWith('_microsoft')
     ? check('github.emu', 'unknown', 'The authenticated account has the Microsoft EMU naming convention, but managed status was not independently verified.',
       'Confirm the account in the Microsoft GitHub enterprise if managed status is required.')

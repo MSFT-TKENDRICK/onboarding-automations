@@ -35,7 +35,7 @@ function check(id, status, message, next, details = {}) {
   return { id, status, message, ...(next ? { next } : {}), ...details };
 }
 
-function matchesSsoUser(token, ssoUserId) {
+export function matchesSsoUser(token, ssoUserId) {
   const parts = token.split('.');
   if (parts.length !== 3 || parts[1].length > 16384) return null;
   try {
@@ -93,11 +93,9 @@ export async function probeAzure({ profile, ssoUserId, timeoutMs = 90000, env = 
   const tokenResult = run(['account', 'get-access-token', '--tenant', TENANT, '--resource', DATAVERSE,
     '--query', '{accessToken:accessToken,tenant:tenant}', '-o', 'json'], profile, env, timeoutMs);
   if (!tokenResult.ok) {
-    const action = ['not_installed', 'not_signed_in'].includes(tokenResult.code);
-    checks.push(check('msx.azure', action ? 'action' : 'unknown',
-      action ? 'The MSX tooling profile could not obtain a Dataverse token.'
-        : 'The MSX tooling profile could not be verified.',
-      'Check the tooling profile and corporate sign-in. MS Sales access requests do not require Azure CLI or a subscription.',
+    checks.push(check('msx.azure', 'unknown',
+      'The cached MSX tooling profile could not be verified with a tenant-scoped Dataverse token.',
+      'Verify cached tooling state outside this readiness run. MS Sales access requests do not require Azure CLI or a subscription.',
       { code: tokenResult.code }));
     return checks;
   }
@@ -117,10 +115,10 @@ export async function probeAzure({ profile, ssoUserId, timeoutMs = 90000, env = 
   if (ssoUserId) {
     const match = matchesSsoUser(token.accessToken, ssoUserId);
     if (match !== true) {
-      checks.push(check('msx.identity', match === false ? 'action' : 'unknown',
+      checks.push(check('msx.identity', 'unknown',
         match === false ? 'The tooling profile does not match the current corporate SSO identity.'
           : 'The tooling profile identity could not be compared with corporate SSO.',
-        'Use a profile for the current corporate SSO identity; do not select an unrelated account.',
+        'Readiness uses only a profile verified against the current corporate SSO identity.',
         { code: match === false ? 'identity_mismatch' : 'identity_unverified' }));
       return checks;
     }

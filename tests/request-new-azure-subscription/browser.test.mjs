@@ -13,11 +13,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 test('launch uses a pipe: no DevToolsActivePort file, CDP answers', { skip, timeout: 120000 }, async () => {
   const b = await launchBrowser();
+  const methods = [];
+  const send = b.cdp.send.bind(b.cdp);
+  b.cdp.send = (method, ...args) => { methods.push(method); return send(method, ...args); };
   try {
     assert.equal(existsSync(join(b.userDataDir, 'DevToolsActivePort')), false);
     const v = await b.cdp.send('Browser.getVersion');
     assert.match(v.product, /(Chrome|Edg|Chromium)/i);
   } finally { await b.close(); }
+  assert.ok(methods.includes('Browser.close'), 'shutdown should first ask the browser to close');
 });
 
 test('the browser exits when the controlling process is killed', { skip, timeout: 180000 }, async () => {

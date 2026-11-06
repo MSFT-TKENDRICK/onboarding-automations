@@ -82,6 +82,7 @@ An MS Sales access request does not require an Azure subscription or Azure CLI s
 ## Validate
 
 ```bash
+npm ci              # install the exact locked Node.js development dependencies
 pip install skills-ref
 python -m skills_ref.cli validate skills/request-new-azure-subscription
 python -m skills_ref.cli validate skills/request-new-github-repository
@@ -90,10 +91,35 @@ python -m skills_ref.cli validate skills/check-msx-access
 python -m skills_ref.cli validate skills/new-hire-readiness
 npm test            # unit + end-to-end tests against local mock services (needs Edge/Chrome; skipped otherwise)
 npm run test:unit   # unit tests only
+npm run test:property  # deterministic generated invariants (seed 0x5eedc0de)
+npm run test:contracts # replay external-boundary and composed JSON contracts
+npm run test:mutation  # sequential targeted mutants; fails below 70%
+npm run test:crap      # CRAP metric; fails for functions above 30 or missing measurement
+npm run test:quality   # all quality gates above
 npm run bench       # plan timings against the mock portal
 ```
 
-CI runs the same checks on every skill and verifies that `.claude-plugin/marketplace.json` lists each one.
+CI validates every skill, verifies that `.claude-plugin/marketplace.json` lists each one, and runs `npm test`.
+The property, contract, mutation, and CRAP commands are explicit local gates; they are not silently included in CI.
+
+All Node test commands run with one worker and a unique `TEMP`/`TMP`/`TMPDIR`. Browser automation requests a graceful
+shutdown and cleans only the throwaway profile created by that run; it never sweeps other profiles. If Windows retains
+an isolated test directory after bounded cleanup, the test runner reports the path and exits nonzero. The readiness
+checks are unattended: they reuse only exact,
+already-authenticated account/profile matches, never start login or account selection, and report `unknown` while
+continuing other checks when identity, tooling, network, or provider evidence is unavailable.
+
+The consumer-side contract fixtures cover GitHub REST/`gh`, tenant-scoped Azure CLI token output, Dataverse `WhoAmI`, the read-only
+`msx_auth_status` MCP tool, StartRight response shapes, Azure request intent decisions, and the versioned JSON contract
+consumed by `new-hire-readiness`. They replay documented/provider fixtures through the real consumers; they do not
+claim independent live-provider verification. Contract drift fails closed rather than being interpreted as access.
+
+The CRAP gate uses the [crap4clj formula](https://github.com/unclebob/crap4clj#crap-formula)
+`CC² × (1 − coverage)³ + CC`, Acorn AST cyclomatic complexity, and V8 per-function source-range coverage. This
+approximates coverage from the unit suite using UTF-16 source offsets, excluding nested functions from their enclosing
+function; it does not measure code executed inside Chromium or by integration tests. It inventories every executable
+skill module, reports functions it cannot measure, and fails rather than treating missing coverage as success. Reports are written to ignored
+`quality-reports/`.
 
 ## Contributing
 

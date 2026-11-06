@@ -129,7 +129,7 @@ export function nextHint(cmd, out) {
   if (cmd === 'submit') {
     if (out.outcome === 'success') return `Report case ${out.caseId} and its status to the user.`;
     if (out.outcome === 'rejected') return "Nothing was created. Show the portal's errors verbatim, fix the values with the user, then re-run plan.";
-    if (out.outcome === 'unknown') return `Do NOT resubmit. Tell the user the request may exist; ${out.probableCaseId ? `run status --case ${out.probableCaseId} (found: true confirms it)` : 'run status in a few minutes'} and report what it shows.`;
+    if (out.outcome === 'unknown') return `Do NOT resubmit. Tell the user the request may exist; ${out.probableCaseId ? `run status --case ${out.probableCaseId} (found: true confirms that case exists, not which submission created it)` : 'run status in a few minutes'} and report what it shows.`;
     if (out.outcome === 'not_submitted') {
       const r = out.reason;
       if (['plan_no_longer_ready', 'plan_mismatch', 'form_changed', 'submit_body_mismatch'].includes(r)) return `Nothing was sent. ${REPLAN}`;
@@ -268,8 +268,9 @@ async function execute(argv, { env = process.env, stdinText = () => readFileSync
     if (cmd === 'status') {
       const res = await ownRequests(s, readProfile(dir).contactId, { caseId: v.case });
       saveProfile(dir, { contactId: res.contactId });
-      if (v.case) return { code: res.requests.length ? 0 : 2, out: { ok: true, found: res.requests.length > 0, requests: res.requests, ms: Math.round(performance.now() - t0) } };
-      return { code: 0, out: { ok: true, requests: res.requests, ms: Math.round(performance.now() - t0) } };
+      const completeness = { complete: res.complete, ...(res.incompleteReason ? { incompleteReason: res.incompleteReason } : {}) };
+      if (v.case) return { code: res.requests.length ? 0 : 2, out: { ok: true, found: res.requests.length > 0, requests: res.requests, ...completeness, ms: Math.round(performance.now() - t0) } };
+      return { code: 0, out: { ok: true, requests: res.requests, ...completeness, ms: Math.round(performance.now() - t0) } };
     }
     await openForm(s);
     if (cmd === 'plan' || cmd === 'options') {

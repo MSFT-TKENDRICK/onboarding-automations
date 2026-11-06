@@ -11,10 +11,10 @@ metadata:
 
 # New-hire readiness
 
-1. Ask which GitHub account, repositories, and minimum role are relevant. Do not copy another employee's access or assume every role needs the same resources.
-2. Run `node <skill>/scripts/new-hire-readiness.mjs check --account <login> --org <organization> --repo <owner/name> --role <role> --root <MCAPS-IQ-checkout>`. Repeat `--org` and `--repo` as needed. If an authorized signed-in Microsoft 365 identity tool is available, pass its current user object ID as `--sso-user-id <object-id>` for silent MSX tooling profile matching. `--server` and `--profile` can select an existing MSX installation and Azure CLI profile.
+1. Use an exact GitHub login only when it is already available from an authorized identity source. Otherwise leave GitHub identity `unknown` and continue without asking the user to select an account. Gather the relevant repositories and minimum role without copying another employee's access or assuming every role needs the same resources.
+2. Run `node <skill>/scripts/new-hire-readiness.mjs check --account <login> --org <organization> --repo <owner/name> --role <role> --root <MCAPS-IQ-checkout>`. Omit `--account` when an authorized exact GitHub identity is unavailable; the GitHub result remains `unknown` and other checks continue. Repeat `--org` and `--repo` as needed. If an authorized signed-in Microsoft 365 identity tool is available, pass its current user object ID as `--sso-user-id <object-id>` for silent MSX tooling profile matching. `--server` and `--profile` can select an existing MSX installation and Azure CLI profile.
 3. Present the checks that are `action`, `unknown`, or `error`, with their next steps. Never label an unknown check complete. Azure subscriptions, demo provisioning, training, assignments, Copilot entitlement, Dual Access, MS Sales entitlement, and the required MSX role need separate verification.
    When a browser is available, review approved and pending MS Sales requests in the official portal as described by the sibling MSX skill. Report only what the portal confirms and do not infer that the approved scope covers the user's requirements.
-4. For requested follow-up, use the relevant individual skill or official source. Get explicit confirmation before sending a request, changing access, accepting terms, or initiating sign-in.
+4. For requested follow-up, use the relevant individual skill or official source. Get explicit confirmation before sending a request, changing access, or accepting terms. Readiness never initiates sign-in or account selection.
 
 The check is read-only and does not install software or submit requests. See [references/CLI.md](references/CLI.md).

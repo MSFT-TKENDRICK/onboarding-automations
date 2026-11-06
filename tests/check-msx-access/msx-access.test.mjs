@@ -218,19 +218,40 @@ test('tries existing profiles until a verified corporate SSO identity is found',
       assert.equal(expected, ssoUserId);
       return profile === matched
         ? [{ id: 'msx.identity', status: 'pass' }, { id: 'msx.dataverse', status: 'pass' }]
-        : [{ id: 'msx.identity', status: 'action', code: 'identity_mismatch' }];
+        : [{ id: 'msx.identity', status: 'unknown', code: 'identity_mismatch' }];
     },
     probe: async ({ profile }) => {
       serverProfile = profile;
       return { toolFound: true, readOnly: true, outcome: 'pass' };
     },
   });
+
   assert.deepEqual(attempts, [join(root, '.azure'), matched]);
   assert.ok(budgets[0] > 0 && budgets[0] <= 90000);
   assert.equal(result.checks.find((c) => c.id === 'msx.profile').matchedProfile, matched);
   assert.equal(serverProfile, matched);
   assert.equal(result.checks.find((c) => c.id === 'msx.identity').status, 'pass');
   assert.ok(!JSON.stringify(result).includes(ssoUserId));
+});
+
+test('continues to later cached profiles when an earlier profile probe throws', async (t) => {
+  const root = checkout(t);
+  const home = join(root, 'home');
+  const matched = join(home, '.azure');
+  mkdirSync(matched, { recursive: true });
+  const attempts = [];
+  const result = await diagnose({ root, home, server: fixture, ssoUserId,
+    env: { ...testEnv, AZURE_CONFIG_DIR: '' },
+    azureProbe: async ({ profile }) => {
+      attempts.push(profile);
+      if (profile === join(root, '.azure')) throw new Error(privateToken);
+      return [{ id: 'msx.identity', status: 'pass' }, { id: 'msx.dataverse', status: 'pass' }];
+    },
+    probe: async () => ({ toolFound: true, readOnly: true, outcome: 'pass' }),
+  });
+  assert.deepEqual(attempts, [join(root, '.azure'), matched]);
+  assert.equal(result.checks.find((c) => c.id === 'msx.profile').matchedProfile, matched);
+  assert.ok(!JSON.stringify(result).includes(privateToken));
 });
 
 test('respects an explicit profile and does not start the server for a mismatched identity', async (t) => {
@@ -242,7 +263,7 @@ test('respects an explicit profile and does not start the server for a mismatche
   const result = await diagnose({ root, home, profile, server: fixture, ssoUserId, env: testEnv,
     azureProbe: async ({ profile: candidate }) => {
       attempts.push(candidate);
-      return [{ id: 'msx.identity', status: 'action', code: 'identity_mismatch' }];
+      return [{ id: 'msx.identity', status: 'unknown', code: 'identity_mismatch' }];
     },
     probe: () => { throw new Error('must not start'); },
   });
@@ -250,6 +271,7 @@ test('respects an explicit profile and does not start the server for a mismatche
   assert.equal(result.checks.find((c) => c.id === 'msx.profile').matchedProfile, undefined);
   assert.equal(result.checks.find((c) => c.id === 'msx.server').status, 'unknown');
   assert.equal(result.checks.find((c) => c.id === 'msx.sso-selection').status, 'unknown');
+  assert.equal(result.status, 'unknown');
 });
 
 test('does not try other profiles without a trusted SSO identity', async (t) => {
@@ -262,6 +284,24 @@ test('does not try other profiles without a trusted SSO identity', async (t) => 
     probe: async () => ({ toolFound: true, readOnly: true, outcome: 'pass' }),
   });
   assert.deepEqual(attempts, [join(root, '.azure')]);
+});
+
+test('readiness mode does not start the server without an exact cached SSO identity', async (t) => {
+  const root = checkout(t);
+  let azureProbed = false;
+  const result = await diagnose({ root, server: fixture, requireIdentity: true, env: testEnv,
+    azureProbe: async () => { azureProbed = true; return []; },
+    probe: () => { throw new Error('must not start'); },
+  });
+  assert.equal(azureProbed, false);
+  assert.equal(result.checks.find((c) => c.id === 'msx.profile').status, 'unknown');
+  assert.equal(result.checks.find((c) => c.id === 'msx.server').status, 'unknown');
+  for (const id of ['msx.profile', 'msx.server']) {
+    const next = result.checks.find((c) => c.id === id).next;
+    assert.match(next, /future readiness check can automatically match cached profiles/);
+    assert.doesNotMatch(next, /provide|select|supply/i);
+  }
+  assert.doesNotMatch(JSON.stringify(result), /az login|complete.*sign-in|interactive sign-in/i);
 });
 
 test('passes the default or requested diagnostic timeout to the server probe', async (t) => {
@@ -282,6 +322,20 @@ test('offers a bounded timeout adjustment when the server is slow', async (t) =>
     throw new Error('MSX server timed out during initialization.');
   } });
   assert.match(result.checks.find((c) => c.id === 'msx.server').next, /--timeout-ms/);
+});
+
+test('handles non-Error server failures without leaking arbitrary values', async (t) => {
+  const root = checkout(t);
+  for (const thrown of [null, { code: privateToken, message: `MSX server timed out during ${privateToken}` }]) {
+    const result = await diagnose({ root, server: fixture, azureProbe: noAzure, env: testEnv,
+      probe: async () => { throw thrown; },
+    });
+    const server = result.checks.find((c) => c.id === 'msx.server');
+    assert.equal(server.status, 'unknown');
+    assert.equal(server.reason, 'MSX server diagnostic failed.');
+    assert.equal(server.code, 'diagnostic_failed');
+    assert.ok(!JSON.stringify(result).includes(privateToken));
+  }
 });
 
 test('bounds a nonresponding MCP server', async (t) => {
@@ -323,7 +377,7 @@ test('never contacts Dataverse using a token for a different SSO identity', asyn
     run: () => tokenResponse({ accessToken: userToken('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee') }),
     whoAmI: () => { throw new Error('must not send'); },
   });
-  assert.equal(checks.find((c) => c.id === 'msx.identity').status, 'action');
+  assert.equal(checks.find((c) => c.id === 'msx.identity').status, 'unknown');
   assert.equal(checks.find((c) => c.id === 'msx.identity').code, 'identity_mismatch');
   assert.equal(checks.some((c) => c.id === 'msx.dataverse'), false);
   assert.ok(!JSON.stringify(checks).includes(ssoUserId));
@@ -361,7 +415,7 @@ test('reports an unavailable tenant-scoped token without requesting a subscripti
     calls.push(args);
     return { ok: false, code: 'not_signed_in' };
   }, whoAmI: () => { throw new Error('must not send'); } });
-  assert.equal(checks[0].status, 'action');
+  assert.equal(checks[0].status, 'unknown');
   assert.match(checks[0].next, /do not require Azure CLI or a subscription/);
   assert.equal(calls.length, 1);
   assert.ok(!calls[0].includes('--subscription'));

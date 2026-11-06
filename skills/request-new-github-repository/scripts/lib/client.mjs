@@ -94,7 +94,7 @@ export async function openSession({ baseUrl = STARTRIGHT_URL, headless = true, b
       const t = setTimeout(() => reject(new SkillError('browser_unresponsive', 'The browser did not attach the page in time (machine overloaded?). Retry.')), 30000);
       attachWaiters.set(targetId, (sid) => { clearTimeout(t); resolve(sid); });
     });
-  } catch (e) { cdp.close(); await browser.close(); throw e; }
+  } catch (e) { await browser.close(); throw e; }
   const page = pageSession(cdp, mainSid);
   let requester = null;
   let csrf = null;
@@ -202,9 +202,7 @@ export async function openSession({ baseUrl = STARTRIGHT_URL, headless = true, b
     async close() {
       if (browser.persistent) {
         await persistSession(cdp, origin, log).catch((e) => log(`session persist skipped: ${e.message}`));
-        await cdp.send('Browser.close', {}, undefined, { timeoutMs: 1500 }).catch(() => {});
       }
-      try { cdp.close(); } catch {}
       await browser.close();
     },
   };

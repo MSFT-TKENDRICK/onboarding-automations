@@ -39,8 +39,8 @@ test('does not continue when the selected account and actual credentials differ'
   assert.equal(result.checks.length, 1);
 });
 
-test('distinguishes a missing GitHub CLI or timeout from a missing account', () => {
-  for (const [code, status] of [['ENOENT', 'error'], ['ETIMEDOUT', 'unknown']]) {
+test('treats a missing GitHub CLI or timeout as an unavailable cached account', () => {
+  for (const [code, status] of [['ENOENT', 'unknown'], ['ETIMEDOUT', 'unknown']]) {
     const result = diagnose({ account: 'alex_microsoft', run: () => ({ ok: false, code }) });
     assert.equal(result.checks[0].status, status);
     assert.equal(result.checks[0].code, code);
@@ -48,7 +48,8 @@ test('distinguishes a missing GitHub CLI or timeout from a missing account', () 
 });
 
 test('treats a 404 as ambiguous and does not claim the repository is absent', () => {
-  const result = diagnose({ repos: ['gim-home/project'], run: fakeGh({
+  const result = diagnose({ account: 'alex_microsoft', repos: ['gim-home/project'], run: fakeGh({
+    'auth token --hostname github.com --user alex_microsoft': { ok: true, text: 'token' },
     'api --hostname github.com user': json({ login: 'alex_microsoft' }),
     'api --hostname github.com repos/gim-home/project': { ok: false, code: 'http_404' },
   }) });
@@ -58,7 +59,8 @@ test('treats a 404 as ambiguous and does not claim the repository is absent', ()
 });
 
 test('does not claim write permission when permissions are missing', () => {
-  const result = diagnose({ repos: ['gim-home/project'], role: 'write', run: fakeGh({
+  const result = diagnose({ account: 'alex_microsoft', repos: ['gim-home/project'], role: 'write', run: fakeGh({
+    'auth token --hostname github.com --user alex_microsoft': { ok: true, text: 'token' },
     'api --hostname github.com user': json({ login: 'alex_microsoft' }),
     'api --hostname github.com repos/gim-home/project': json({ full_name: 'gim-home/project' }),
   }) });
@@ -66,7 +68,8 @@ test('does not claim write permission when permissions are missing', () => {
 });
 
 test('recognizes insufficient permission without inferring managed status from the login', () => {
-  const result = diagnose({ repos: ['owner/project'], role: 'write', run: fakeGh({
+  const result = diagnose({ account: 'alex', repos: ['owner/project'], role: 'write', run: fakeGh({
+    'auth token --hostname github.com --user alex': { ok: true, text: 'token' },
     'api --hostname github.com user': json({ login: 'alex' }),
     'api --hostname github.com repos/owner/project': json({ full_name: 'owner/project', permissions: { pull: true } }),
   }) });
@@ -75,7 +78,8 @@ test('recognizes insufficient permission without inferring managed status from t
 });
 
 test('reports active, pending and unverifiable organization membership', () => {
-  const result = diagnose({ orgs: ['active-org', 'pending-org', 'unknown-org'], run: fakeGh({
+  const result = diagnose({ account: 'alex_microsoft', orgs: ['active-org', 'pending-org', 'unknown-org'], run: fakeGh({
+    'auth token --hostname github.com --user alex_microsoft': { ok: true, text: 'token' },
     'api --hostname github.com user': json({ login: 'alex_microsoft' }),
     'api --hostname github.com user/memberships/orgs/active-org': json({ state: 'active' }),
     'api --hostname github.com user/memberships/orgs/pending-org': json({ state: 'pending' }),
@@ -92,7 +96,8 @@ test('does not claim repository access from malformed or mismatched responses', 
     { full_name: 'different/project', permissions: { pull: true, push: true } },
     { full_name: 'gim-home/project', permissions: { pull: true, push: 'false' } },
   ]) {
-    const result = diagnose({ repos: ['gim-home/project'], role: 'write', run: fakeGh({
+    const result = diagnose({ account: 'alex_microsoft', repos: ['gim-home/project'], role: 'write', run: fakeGh({
+      'auth token --hostname github.com --user alex_microsoft': { ok: true, text: 'token' },
       'api --hostname github.com user': json({ login: 'alex_microsoft' }),
       'api --hostname github.com repos/gim-home/project': json(response),
     }) });
@@ -101,7 +106,10 @@ test('does not claim repository access from malformed or mismatched responses', 
 });
 
 test('does not accept an invalid authenticated account response', () => {
-  const result = diagnose({ run: fakeGh({ 'api --hostname github.com user': json({ login: '' }) }) });
+  const result = diagnose({ account: 'alex_microsoft', run: fakeGh({
+    'auth token --hostname github.com --user alex_microsoft': { ok: true, text: 'token' },
+    'api --hostname github.com user': json({ login: '' }),
+  }) });
   assert.equal(result.checks[0].status, 'unknown');
   assert.equal(result.checks[0].code, 'invalid_response');
 });
@@ -122,4 +130,19 @@ test('rejects invalid arguments before running commands', () => {
   assert.throws(() => parseArgs(['check', '--repo']), /missing/);
   assert.throws(() => diagnose({ repos: ['../unsafe'] }), /owner\/name/);
   assert.throws(() => diagnose({ role: 'admin' }), /Role/);
+});
+
+test('does not choose an active account or ask for sign-in when no exact cached account is supplied', () => {
+  const result = diagnose({ run: () => { throw new Error('must not enumerate or select an account'); } });
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.checks[0].status, 'unknown');
+  assert.match(result.checks[0].next, /future readiness check/);
+  assert.doesNotMatch(result.checks[0].next, /provide|select|supply/i);
+  assert.doesNotMatch(JSON.stringify(result), /auth login|sign in|log in/i);
+});
+
+test('reports an unavailable cached account as unknown without interactive guidance', () => {
+  const result = diagnose({ account: 'alex_microsoft', run: () => ({ ok: false, code: 'not_authenticated' }) });
+  assert.equal(result.status, 'unknown');
+  assert.doesNotMatch(JSON.stringify(result), /auth login|sign in|log in/i);
 });

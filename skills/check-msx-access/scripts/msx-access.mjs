@@ -13,13 +13,17 @@ const DEFAULT_SERVER = join(homedir(), '.copilot', 'mcaps-iq', 'msx-mcp', 'node_
   '@mcaps-microsoft', 'msx-mcp', 'dist', 'servers', 'msx.js');
 const DEFAULT_TIMEOUT_MS = 180000;
 const GUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
+const SAFE_ERROR_CODES = new Set(['EACCES', 'ECONNREFUSED', 'ECONNRESET', 'ENOENT', 'ENOTDIR',
+  'ENOTFOUND', 'EPERM', 'EPIPE', 'ETIMEDOUT', 'ERR_MODULE_NOT_FOUND']);
+const TIMEOUT_REASONS = new Set(['initialization', 'tool discovery', 'authentication check']
+  .map((phase) => `MSX server timed out during ${phase}.`));
 const DIAGNOSTIC_ACTIONS = [
   { pattern: /Azure CLI:.*Not signed in/i, code: 'not_signed_in',
     message: 'The server reported that the selected Azure profile is not signed in.',
-    next: 'Check the Azure CLI profile and use the approved interactive sign-in flow if needed.' },
+    next: 'Verify cached tooling state outside this readiness run; it does not start sign-in.' },
   { pattern: /Azure CLI:.*Wrong tenant/i, code: 'wrong_tenant',
     message: 'The server reported a different Azure tenant.',
-    next: 'Check the profile and select the intended corporate tenant.' },
+    next: 'Verify the cached profile outside this readiness run; it does not select another account or tenant.' },
   { pattern: /Azure CLI:.*Not installed/i, code: 'not_installed',
     message: 'The server reported that Azure CLI is not installed.',
     next: 'Check Azure CLI installation and PATH using your organization’s approved process.' },
@@ -36,6 +40,12 @@ const DIAGNOSTIC_ACTIONS = [
     message: 'The server reported that it could not reach Dataverse.',
     next: 'Check the corporate network or VPN, then retry.' },
 ];
+
+export function safeReason(error) {
+  const message = typeof error?.message === 'string' ? error.message : '';
+  if (TIMEOUT_REASONS.has(message)) return message;
+  return 'MSX server diagnostic failed.';
+}
 
 function check(id, status, message, next, details = {}) {
   return { id, status, message, ...(next ? { next } : {}), ...details };
@@ -60,6 +70,10 @@ function directoryExists(path) {
     if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return false;
     throw error;
   }
+}
+
+function safeCode(error, fallback) {
+  return typeof error?.code === 'string' && SAFE_ERROR_CODES.has(error.code) ? error.code : fallback;
 }
 
 function validServerConfiguration(server) {
@@ -179,7 +193,7 @@ export async function probeServer({ server, cwd, profile, timeoutMs = DEFAULT_TI
 }
 
 export async function diagnose({ root, server = DEFAULT_SERVER, profile, ssoUserId, timeoutMs = DEFAULT_TIMEOUT_MS,
-  env = process.env, home = homedir(), probe = probeServer, azureProbe = probeAzure } = {}) {
+  env = process.env, home = homedir(), probe = probeServer, azureProbe = probeAzure, requireIdentity = false } = {}) {
   if (!Number.isInteger(timeoutMs) || timeoutMs < 1000 || timeoutMs > 300000) {
     throw new Error('--timeout-ms must be an integer from 1000 to 300000.');
   }
@@ -228,15 +242,30 @@ export async function diagnose({ root, server = DEFAULT_SERVER, profile, ssoUser
   let selectedChecks;
   let fallback;
   let matchedProfile = false;
-  if (defaultEndpoint) {
+  if (defaultEndpoint && (!requireIdentity || ssoUserId)) {
     const deadline = Date.now() + timeoutMs;
-    const existing = candidates.filter(directoryExists);
+    const existing = [];
+    for (const candidate of candidates) {
+      try {
+        if (directoryExists(candidate)) existing.push(candidate);
+      } catch {
+        if (!fallback) fallback = { profile: candidate, checks: [check('msx.identity', 'unknown',
+          'A cached tooling profile could not be inspected.',
+          'Readiness continued to other cached profiles.', { code: 'profile_unavailable' })] };
+      }
+    }
     for (let index = 0; index < existing.length; index++) {
       const candidate = existing[index];
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       const candidateBudget = Math.max(1, Math.floor(remaining / (existing.length - index)));
-      const candidateChecks = await azureProbe({ profile: candidate, ssoUserId, timeoutMs: candidateBudget, env });
+      let candidateChecks;
+      try {
+        candidateChecks = await azureProbe({ profile: candidate, ssoUserId, timeoutMs: candidateBudget, env });
+      } catch {
+        candidateChecks = [check('msx.identity', 'unknown', 'A cached tooling profile probe failed.',
+          'Readiness continued to other cached profiles.', { code: 'probe_failed' })];
+      }
       const identity = candidateChecks.find((item) => item.id === 'msx.identity');
       const dataverse = candidateChecks.find((item) => item.id === 'msx.dataverse');
       const current = { profile: candidate, checks: candidateChecks };
@@ -253,32 +282,44 @@ export async function diagnose({ root, server = DEFAULT_SERVER, profile, ssoUser
     profile = fallback.profile;
     selectedChecks = fallback.checks;
   }
-  const profileDirectory = directoryExists(profile);
+  let profileDirectory = false;
+  try { profileDirectory = directoryExists(profile); } catch {}
   if (!profileDirectory) {
-    checks.push(check('msx.profile', 'action', 'The selected Azure CLI profile is not an existing directory.',
-      'Set up the intended tooling profile. MS Sales access requests do not require Azure CLI or a subscription.'));
+    checks.push(check('msx.profile', requireIdentity ? 'unknown' : 'action',
+      requireIdentity
+        ? 'No matching already-authenticated tooling profile directory was available.'
+        : 'The selected Azure CLI profile is not an existing directory.',
+      requireIdentity
+        ? 'Readiness continues without tooling identity verification; it does not create or authenticate a profile.'
+        : 'Set up the intended tooling profile outside this diagnostic. MS Sales access requests do not require Azure CLI or a subscription.'));
   } else {
-    checks.push(check('msx.profile', 'pass', matchedProfile
+    checks.push(check('msx.profile', matchedProfile || !requireIdentity ? 'pass' : 'unknown', matchedProfile
       ? 'An existing tooling profile matched corporate SSO for this diagnostic.'
-      : 'The tooling profile exists.', null, matchedProfile ? { matchedProfile: profile } : {}));
+      : requireIdentity ? 'A tooling profile exists, but no exact corporate SSO identity match was verified.'
+        : 'The tooling profile exists.',
+    matchedProfile || !requireIdentity ? null : 'A future readiness check can automatically match cached profiles when an authorized corporate SSO identity is available; it does not start sign-in or choose an account.',
+    matchedProfile ? { matchedProfile: profile } : {}));
     if (selectedChecks) checks.push(...selectedChecks);
   }
   if (ssoUserId && !matchedProfile && defaultEndpoint) {
     checks.push(check('msx.sso-selection', 'unknown', 'No tooling profile was verified to match corporate SSO.',
-      'Reuse an authorized corporate SSO session or complete the organization-required sign-in; do not select an unrelated subscription.'));
+      'Verify cached corporate SSO state outside this readiness run; do not select an unrelated account or subscription.'));
   }
   if (!fileExists(server)) {
     checks.push(check('msx.server', 'unknown', 'An installed MSX MCP server was not found.',
       'Provide --server with the installed server entry point; this check does not install software.'));
   } else if (!profileDirectory) {
     checks.push(check('msx.server', 'unknown', 'The server was not started because the selected profile is not an existing directory.',
-      'Set up the intended Azure CLI profile, then retry.'));
+      'Readiness continues without the server diagnostic; it does not create or authenticate a profile.'));
   } else if (!defaultEndpoint) {
     checks.push(check('msx.server', 'unknown', 'The server was not started with an unverified Dataverse endpoint.',
       'Verify the intended endpoint in the configured MCP host.'));
   } else if (ssoUserId && !matchedProfile) {
     checks.push(check('msx.server', 'unknown', 'The server was not started because the tooling identity was not verified against corporate SSO.',
       'Resolve the tenant-scoped identity and connection checks before using the server.'));
+  } else if (requireIdentity && !ssoUserId) {
+    checks.push(check('msx.server', 'unknown', 'The server was not started because no exact corporate SSO identity was available for profile matching.',
+      'A future readiness check can automatically match cached profiles when an authorized corporate SSO identity is available; it does not start sign-in.'));
   } else {
     try {
       const result = await probe({ server: resolve(server), cwd: root || undefined, profile, timeoutMs, env });
@@ -311,15 +352,16 @@ export async function diagnose({ root, server = DEFAULT_SERVER, profile, ssoUser
             result.outcome === 'pass' ? 'MSX sign-in, token, and Dataverse connection passed the server diagnostic.'
               : result.outcome === 'action' ? action?.message || 'The server reported an authentication or access problem.'
                 : 'The server diagnostic did not establish a healthy MSX connection.',
-            result.outcome === 'pass' ? null : action?.next || 'Inspect msx_auth_status in the MCP host and follow its current guidance.',
+            result.outcome === 'pass' ? null : action?.next || 'Review the noninteractive tenant-scoped diagnostic; requesting MS Sales access does not require an Azure subscription.',
             action ? { code: action.code } : {}));
         }
       }
     } catch (error) {
+      const reason = safeReason(error);
       checks.push(check('msx.server', 'unknown', 'The installed MSX server could not complete its diagnostic.',
-        error.message.startsWith('MSX server timed out')
+        reason.startsWith('MSX server timed out')
           ? 'If startup is slow, retry with a longer --timeout-ms (up to 300000); otherwise inspect the server in the MCP host.'
-          : 'Inspect the server in the MCP host and retry.', { reason: error.message }));
+          : 'Inspect the server in the MCP host and retry.', { reason, code: safeCode(error, 'diagnostic_failed') }));
     }
   }
   checks.push(check('msx.sales-access', 'unknown', 'MS Sales User Account - Basic entitlement was not independently verified.',

@@ -34,7 +34,8 @@ export function validateChoice(ans, criteria) {
   const max = Math.max(...ps);
   const leaders = criteria.filter((k) => ans.probabilities[k] === max);
   if (leaders.length !== 1 || ans.choice !== leaders[0]) return bad('argmax');
-  if (typeof ans.confidence !== 'number' || Math.abs(ans.confidence - max) > TOLERANCE) return bad('confidence');
+  if (!Number.isFinite(ans.confidence) || ans.confidence < 0 || ans.confidence > 1
+    || Math.abs(ans.confidence - max) > TOLERANCE) return bad('confidence');
   const ranked = criteria.map((k) => [k, ans.probabilities[k]]).sort((a, b) => b[1] - a[1]);
   return { ok: true, choice: ans.choice, p: max, margin: max - (ranked[1]?.[1] ?? 0), probabilities: Object.fromEntries(ranked) };
 }

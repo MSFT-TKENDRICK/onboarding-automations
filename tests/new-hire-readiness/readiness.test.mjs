@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { readFileSync } from 'node:fs';
 import { diagnose, parseArgs } from '../../skills/new-hire-readiness/scripts/new-hire-readiness.mjs';
 
 function loader(kind, checks, received) {
@@ -23,6 +24,7 @@ test('composes checks and preserves unverified onboarding areas', async () => {
   assert.equal(received.msx.root, '/checkout');
   assert.equal(received.msx.ssoUserId, ssoUserId);
   assert.equal(received.msx.timeoutMs, 120000);
+  assert.equal(received.msx.requireIdentity, true);
   assert.equal(result.checks.find((c) => c.id === 'onboarding.training').status, 'unknown');
   assert.equal(result.checks.find((c) => c.id === 'azure.subscription').status, 'unknown');
   assert.match(result.checks.find((c) => c.id === 'azure.subscription').message, /Whether an Azure subscription is needed/);
@@ -35,9 +37,23 @@ test('reports a missing skill without hiding the other results', async () => {
     github: async () => { throw new Error('missing'); },
     msx: loader('msx', [{ id: 'msx.auth', status: 'pass', message: 'Authenticated.' }], received),
   });
+
   assert.equal(result.status, 'error');
   assert.equal(result.checks.find((c) => c.id === 'github.integration').status, 'error');
   assert.equal(result.checks.find((c) => c.id === 'msx.auth').status, 'pass');
+});
+
+test('handles non-Error integration failures and continues other readiness checks', async () => {
+  const secret = 'private.token.value';
+  for (const thrown of [null, { code: secret }]) {
+    const result = await diagnose({}, {
+      github: async () => ({ diagnose: async () => { throw thrown; } }),
+      msx: loader('msx', [{ id: 'msx.auth', status: 'pass', message: 'Cached identity.' }], {}),
+    });
+    assert.equal(result.checks.find((c) => c.id === 'github.integration').code, 'check_failed');
+    assert.equal(result.checks.find((c) => c.id === 'msx.auth').status, 'pass');
+    assert.ok(!JSON.stringify(result).includes(secret));
+  }
 });
 
 test('preserves the matched MSX profile for downstream tooling', async () => {
@@ -88,4 +104,24 @@ test('the CLI emits a single structured error for invalid arguments', () => {
   const output = JSON.parse(result.stdout);
   assert.equal(output.kind, 'new-hire-readiness');
   assert.equal(output.checks[0].id, 'readiness.arguments');
+});
+
+test('requires exact cached identity matching without stopping other readiness checks', async () => {
+  const received = {};
+  const result = await diagnose({ account: 'alex_microsoft' }, {
+    github: loader('github', [{ id: 'github.authentication', status: 'pass', message: 'Exact cached account.' }], received),
+    msx: loader('msx', [{ id: 'msx.profile', status: 'unknown',
+      message: 'No exact cached corporate identity match.' }], received),
+  });
+  assert.equal(received.msx.requireIdentity, true);
+  assert.equal(result.status, 'unknown');
+  assert.equal(result.checks.find((check) => check.id === 'github.authentication').status, 'pass');
+  assert.equal(result.checks.find((check) => check.id === 'msx.profile').status, 'unknown');
+  assert.doesNotMatch(JSON.stringify(result), /az login|gh auth login|start sign-in|interactive sign-in/i);
+});
+
+test('skill instructions omit account input when an authorized identity is unavailable', () => {
+  const skill = readFileSync(fileURLToPath(new URL('../../skills/new-hire-readiness/SKILL.md', import.meta.url)), 'utf8');
+  assert.match(skill, /Omit `--account` when an authorized exact GitHub identity is unavailable/);
+  assert.doesNotMatch(skill, /Ask which GitHub account/i);
 });
