@@ -62,8 +62,12 @@ metadata:
    membership and run the planner again. If the reviewed account or scope
    changes, obtain a new user selection. Discard changed proposals and show any
    revised proposal before approval; skip an opportunity if membership now exists.
-   Invoke the provider's `dataverse_write` elicitation for each write; never
-   auto-approve or replace it with direct HTTP.
+   Use an interactive MCP path that can deliver the provider's
+   `dataverse_write` elicitation to the real user. The daemon's shared
+   upstream registry and CodeAct tool dispatcher do not support elicitation;
+   never use them for these writes. If the approval path or user is unavailable,
+   leave the proposal pending. Never auto-approve or replace provider
+   elicitation with direct HTTP.
 12. Re-read membership after the approved write. Record `verified-added` only if
    the exact user is active on the exact opportunity. On a timeout/lost response,
    record `unknown` and reconcile read-only; never blindly retry. Never remove

@@ -12,6 +12,17 @@ The provider requires human approval through MCP elicitation for every
 the initial automation request nor an agent-generated approval flag bypasses
 that gate. Do not claim unattended additions are supported.
 
+The msft-daemon shared upstream registry creates MCP clients without an
+elicitation handler, and its CodeAct dispatcher uses that registry. They may
+serve read-only discovery but cannot deliver the provider's approval prompt;
+do not use either path for `dataverse_write`. The daemon's direct Copilot SDK
+path can register the HumanBridge callback when enabled, but registration and
+unit tests alone do not prove a real user can receive and answer a provider
+request. Before calling the write tool, establish that the current interactive
+session has a reachable human and an elicitation-capable MCP path. If this
+cannot be established, leave the proposal pending without attempting a write.
+Do not impersonate a human or synthesize an approval.
+
 No system can promise literal 100% knowledge of external assignment records.
 Signals and scores identify candidates; only the user's explicit selection
 establishes which of those accounts they say are assigned to them. A selection
