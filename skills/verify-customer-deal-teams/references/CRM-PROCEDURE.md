@@ -63,18 +63,20 @@ the proposal.
    source or missing semantic field does not prevent other candidates from
    being reviewed. Never claim complete customer coverage when any source is
    partial/unavailable, the search was bounded, or identity resolution was
-   ambiguous. Do not expand to an entire corporate family or territory.
+   ambiguous. Respect policy or access denials; do not retrieve denied data
+   through another tool, account, or transport. Do not expand to an entire
+   corporate family or territory.
 
 ## Candidate ranking and human selection
 
 ### Preliminary customer-name review
 
-When duplicate or unresolved CRM accounts prevent a complete exact-account
-review, first review the discovered customer names. Supply all discovered
-names, including names with resolved CRM matches, rather than silently
-discarding unresolved candidates. Use the same `expectedIdentity`, `identity`,
-`sources`, and signal fields as the exact-account example below, but replace
-`discovery.records` with name-level candidates:
+Always review the discovered customer names before exact-account ranking, even
+when all CRM matches are unambiguous. Supply all discovered names, including
+names with resolved CRM matches, rather than silently discarding unresolved
+candidates. Use the same `expectedIdentity`, `identity`, `sources`, and signal
+fields as the exact-account example below, but replace `discovery.records`
+with name-level candidates:
 
 ```json
 {
@@ -107,16 +109,31 @@ The result reports `grantsAssignment: false` and
 CRM GUID nor permission to plan or write. Resolve each selected name and obtain
 a separate exact-account selection below; stop when the user cannot
 disambiguate. A user-supplied missing name requires a new preliminary review.
+Do not use the exact-account ranking or planner until the user has answered the
+name review.
 
 ### Exact-account ranking and confirmation
 
-The helper ranks normalized evidence; it does not fetch anything. Store its
-input/output outside the repository. Supply every source kind below exactly
-once, including unavailable sources. Every signal must be linked to the
-authenticated user and the exact candidate account, with a source and record
-identifier; only a `user-provided` signal may have a null `recordId`. Summaries
-describe the evidence, not raw email, chat text, credentials, or instructions.
-`observedAt` is the read time, not an invented event date.
+Resolve only the selected names to exact CRM account candidates and record
+each explicit name-to-account mapping. A selected name may map to multiple
+candidate accounts for the user to disambiguate, but every candidate account
+must map to exactly one selected name. Every selected name must have at least
+one resolved account before ranking; if it cannot be resolved, stop and ask
+the user rather than omitting it. If two selected names resolve to the same
+account, ask the user to clarify the names and repeat the name review rather
+than silently merging them.
+
+The helper ranks normalized evidence; it does not fetch anything or verify a
+human response. Store its input/output outside the repository. Include the
+unchanged name-level discovery object, the actual name-level selection, and
+the account mappings in `customerReview`. Replace the placeholder below with
+the actual discovery object, not a string. Exact-account discovery must be read
+after name confirmation. Supply every source kind below exactly once, including
+unavailable sources. Every signal must be linked to the authenticated user and
+the exact candidate account, with a source and record identifier; only a
+`user-provided` signal may have a null `recordId`. Summaries describe the
+evidence, not raw email, chat text, credentials, or instructions. `observedAt`
+is the read time, not an invented event date.
 
 ```json
 {
@@ -124,6 +141,15 @@ describe the evidence, not raw email, chat text, credentials, or instructions.
   "identity": {
     "tenantId": "<guid>", "userId": "<guid>", "displayName": "Resolved user",
     "role": "SE", "active": true, "observedAt": "<ISO date>"
+  },
+  "customerReview": {
+    "discovery": "<unchanged name-level discovery object>",
+    "confirmation": {
+      "customerSetId": "<customerSetId returned by name ranking>",
+      "userId": "<guid>", "observedAt": "<human response ISO date>",
+      "selectedCustomerIds": ["customer-1"]
+    },
+    "accountMappings": [{"customerId": "customer-1", "accountId": "<guid>"}]
   },
   "discovery": {
     "observedAt": "<ISO date>",
@@ -165,22 +191,26 @@ Use `current` only when supported by live semantics; missing dates or uncertain
 state are `unknown`. A `coverage-transition` signal must identify its actual
 source and record, not a speculation.
 
-Show all ranked accounts, names, exact GUIDs, scores, evidence summaries,
-contradictory signals, and incomplete sources to the user. Ask which accounts
-are accurately assigned to them. Use a multi-select if supported, otherwise
-ask separately per account or in unambiguous batches. Do not select or infer
-answers for the user. If the user names a missing account, resolve its exact
-GUID, add a `user-provided` signal, rerank, and obtain a new selection for the
-changed list. An unavailable or ambiguous answer leaves the run pending.
+Show all ranked accounts, their selected customer names, exact GUIDs, scores,
+evidence summaries, contradictory signals, and incomplete sources to the user.
+Ask which accounts are accurately assigned to them. Use a multi-select if
+supported, otherwise ask separately per account or in unambiguous batches.
+Do not select or infer answers for the user. If the user names a missing
+account for a selected customer, resolve its exact GUID, add its mapping and a
+`user-provided` signal, rerank, and obtain a new exact-account selection. A
+new or previously unselected customer name requires a new name review first.
+An unavailable or ambiguous answer leaves the run pending.
 
 Record the actual response and its session/elicitation reference in the local
 audit. Bind only the user's selections to the `candidateSetId` from the exact
-list they reviewed. The hash detects changed normalized evidence; it does not
-authenticate the response. The harness must obtain the real response and never
-manufacture it from a caller-supplied JSON file, a score, or a previous run.
-Candidate discovery and confirmation must be no more than 24 hours old, and
-the confirmation must follow discovery; if the list changes or expires, rerank
-and ask again. Re-read the selected accounts and current CRM state before use.
+list they reviewed. The exact-account fingerprint also binds the prior
+name-review fingerprint, selection, and name-to-account mappings. The hashes
+detect changed normalized evidence; they do not authenticate responses. The
+harness must obtain both real responses and never manufacture them from a
+caller-supplied JSON file, a score, or a previous run. Both reviews must be no
+more than 24 hours old, and each confirmation must follow its discovery; if
+either list changes or expires, rerank and ask again. Re-read the selected
+accounts and current CRM state before use.
 
 ## Opportunities and membership
 
@@ -222,9 +252,10 @@ confirmation. The five-minute bound is only for a proposal; pre-write
 revalidation remains mandatory regardless of age.
 
 Replace `<unchanged discovery object>` with the same JSON object used for
-ranking, not a string. `accounts.records` contains exactly the selected GUIDs
-freshly re-read from CRM. `selectedAccountIds` must be exactly the user's
-actual selections from that reviewed candidate set.
+exact-account ranking, and `<unchanged customerReview object>` with the
+customer-review object used there, not strings. `accounts.records` contains
+exactly the selected GUIDs freshly re-read from CRM. `selectedAccountIds` must
+be exactly the user's actual selections from that reviewed candidate set.
 
 ```json
 {
@@ -236,6 +267,7 @@ actual selections from that reviewed candidate set.
   },
   "assignments": {
     "source": "user-confirmed-candidates",
+    "customerReview": "<unchanged customerReview object>",
     "discovery": "<unchanged discovery object>",
     "accounts": {
       "complete": true, "observedAt": "<ISO date>",

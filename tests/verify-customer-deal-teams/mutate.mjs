@@ -15,6 +15,19 @@ const mutations = [
   ['fresh evidence', 'at <= now && now - at <= MAX_AGE_MS', 'true'],
   ['post-confirmation reads', 'at >= notBefore', 'true'],
   ['candidate signal user', "guid(signal.userId, 'candidate signal user') === userId", 'true'],
+  ['customer confirmation fingerprint', 'confirmation.customerSetId === ranked.customerSetId', 'true'],
+  ['customer confirmation user', "guid(confirmation.userId, 'customer confirmation user') === identity.userId", 'true'],
+  ['customer confirmation follows discovery',
+    "nameConfirmedAt >= timestamp(ranked.observedAt, 'customer discovery.observedAt')", 'true'],
+  ['customer confirmation freshness', 'nameConfirmedAt <= now && now - nameConfirmedAt <= MAX_REVIEW_AGE_MS', 'true'],
+  ['exact discovery follows name review', 'discoveredAt >= reviewedCustomers.confirmedAt', 'true'],
+  ['selected customer was reviewed', 'candidates.has(id)', 'true'],
+  ['mapped customer was selected', 'selected.has(id)', 'true'],
+  ['every selected customer resolved', 'resolvedCustomers.size === selected.size', 'true'],
+  ['candidate has a customer mapping', 'mappedCustomer !== undefined', 'true'],
+  ['every mapped account reviewed', 'accountIds.size === reviewedCustomers.accounts.size', 'true'],
+  ['customer source coverage retained', 'reviewedCustomers.review.scopeComplete && scopeComplete(sources)',
+    'scopeComplete(sources)'],
   ['confirmation source', "assignments.source === 'user-confirmed-candidates'", 'true'],
   ['confirmation fingerprint', 'confirmation.candidateSetId === ranked.candidateSetId', 'true'],
   ['confirmation user', "guid(confirmation.userId, 'confirmation user') === identity.userId", 'true'],
@@ -35,7 +48,7 @@ const mutations = [
   ['bounded confidence', 'Math.min(100, reasons.reduce', 'Math.min(1000, reasons.reduce'],
   ['preliminary review does not confirm accounts', 'grantsAssignment: false', 'grantsAssignment: true'],
   ['exact review remains required', 'requiresExactAccountReview: true', 'requiresExactAccountReview: false'],
-  ['unique preliminary candidates', "unique(customerIds, row.customerId, 'customer candidate');", 'void 0;'],
+  ['unique preliminary candidates', "unique(customerIds, id, 'customer candidate');", 'void 0;'],
 ];
 const root = await mkdtemp(join(tmpdir(), 'deal-team-mutations-'));
 let killed = 0;

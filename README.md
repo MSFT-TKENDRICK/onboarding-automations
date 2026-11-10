@@ -8,7 +8,7 @@
 | --- | --- |
 | [`request-new-azure-subscription`](skills/request-new-azure-subscription/SKILL.md) | Submits a new MCAPS, ESLabs, or internal Azure subscription request through the MCAPS Services portal and returns the support case ID. Uses a zero-dependency Node script that drives headless Edge over the DevTools protocol with your corporate SSO; see its [benchmarks](skills/request-new-azure-subscription/references/BENCHMARKS.md). |
 | [`request-new-github-repository`](skills/request-new-github-repository/SKILL.md) | Creates a new non-production GitHub EMU repository through StartRight, the sanctioned self-service path, and returns its URL. Refuses production, TCB and HVT code and points to GitHub Proxima. Contract-tested against a local mock: the live create call is never exercised by tests. |
-| [`verify-customer-deal-teams`](skills/verify-customer-deal-teams/SKILL.md) | Discovers and scores customer candidates from CRM and available M365 signals, reviews ambiguous names before exact-account confirmation, and prepares missing self-adds on existing open opportunities. Scores never prove assignment; additions require fresh revalidation and the provider's per-write human approval. |
+| [`verify-customer-deal-teams`](skills/verify-customer-deal-teams/SKILL.md) | Discovers and scores customer candidates from CRM and available M365 signals, always reviews names before separate exact-account confirmation, and prepares missing self-adds on existing open opportunities. Scores never prove assignment; additions require fresh revalidation and the provider's per-write human approval. |
 
 ## Requirements
 

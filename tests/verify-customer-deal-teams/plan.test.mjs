@@ -22,12 +22,25 @@ const signal = (kind, overrides = {}) => ({
   observedAt: date, strength: 'current', summary: 'Synthetic association', ...overrides,
 });
 
-function refreshCandidateSet(input) {
+function refreshCustomerReview(input, clock = now) {
+  const review = input.assignments.customerReview;
+  const result = rankCustomerCandidates({
+    expectedIdentity: input.expectedIdentity,
+    identity: input.identity,
+    discovery: review.discovery,
+  }, { now: clock });
+  assert.equal(result.status, 'customer-candidates', result.reason);
+  review.confirmation.customerSetId = result.customerSetId;
+  return result;
+}
+
+function refreshCandidateSet(input, clock = now) {
   const result = rankCandidates({
     expectedIdentity: input.expectedIdentity,
     identity: input.identity,
+    customerReview: input.assignments.customerReview,
     discovery: input.assignments.discovery,
-  }, { now });
+  }, { now: clock });
   assert.equal(result.status, 'candidates', result.reason);
   input.assignments.confirmation.candidateSetId = result.candidateSetId;
   return result;
@@ -42,6 +55,21 @@ function evidence() {
     },
     assignments: {
       source: 'user-confirmed-candidates',
+      customerReview: {
+        discovery: {
+          observedAt: date,
+          sources: sourceKinds.map(kind => ({ kind, status: 'complete' })),
+          records: [{
+            customerId: 'fixture-customer', customerName: 'Fixture Customer',
+            signals: [signal('opportunity-team'), signal('open-opportunity')],
+          }],
+        },
+        confirmation: {
+          customerSetId: '', userId: id(2), observedAt: date,
+          selectedCustomerIds: ['fixture-customer'],
+        },
+        accountMappings: [{ customerId: 'fixture-customer', accountId: id(4) }],
+      },
       discovery: {
         observedAt: date,
         sources: sourceKinds.map(kind => ({ kind, status: 'complete' })),
@@ -58,6 +86,7 @@ function evidence() {
     }]),
     memberships: snapshot([]),
   };
+  refreshCustomerReview(input);
   refreshCandidateSet(input);
   return input;
 }
@@ -67,14 +96,18 @@ function customerEvidence() {
   return {
     expectedIdentity: input.expectedIdentity,
     identity: input.identity,
-    discovery: {
-      ...input.assignments.discovery,
-      records: [{
-        customerId: 'fixture-customer', customerName: 'Fixture Customer',
-        signals: structuredClone(input.assignments.discovery.records[0].signals),
-      }],
-    },
+    discovery: structuredClone(input.assignments.customerReview.discovery),
   };
+}
+
+function refreshCustomerReviewTime(input, observedAt) {
+  const review = input.assignments.customerReview;
+  review.discovery.observedAt = observedAt;
+  for (const candidate of review.discovery.records) {
+    for (const item of candidate.signals) item.observedAt = observedAt;
+  }
+  review.confirmation.observedAt = observedAt;
+  return refreshCustomerReview(input, Date.parse(observedAt));
 }
 
 function blocked(input, pattern) {
@@ -98,6 +131,9 @@ test('confirmed exact candidate yields pending self-add, never write authorizati
     opportunityName: 'Fixture opportunity', assignmentIds: [],
     assignmentEvidence: {
       method: 'user-confirmed-candidates',
+      customerSetId: input.assignments.customerReview.confirmation.customerSetId,
+      customerId: 'fixture-customer',
+      customerConfirmedAt: date,
       candidateSetId: input.assignments.confirmation.candidateSetId,
       confirmedAt: date,
       confidence: 75,
@@ -106,6 +142,8 @@ test('confirmed exact candidate yields pending self-add, never write authorizati
   assert.equal(result.candidateReview.candidateCount, 1);
   assert.equal(result.candidateReview.confirmedAccountCount, 1);
   assert.equal(result.candidateReview.scopeComplete, true);
+  assert.equal(result.candidateReview.customerReview.candidateCount, 1);
+  assert.equal(result.candidateReview.customerReview.selectedCustomerCount, 1);
   assert.equal(result.writesPerformed, 0);
   assert.equal(result.requiresLiveRevalidation, true);
   assert.equal(result.requiresProviderApproval, true);
@@ -203,6 +241,13 @@ for (const key of ['assignments', 'opportunities', 'memberships']) {
 for (const key of ['identity', 'assignments', 'opportunities', 'memberships']) {
   test(`blocks ${key} evidence read before account confirmation`, () => {
     const input = evidence();
+    const customerDiscoveryAt = new Date(now - 3000).toISOString();
+    input.assignments.customerReview.discovery.observedAt = customerDiscoveryAt;
+    input.assignments.customerReview.discovery.records[0].signals.forEach(item => {
+      item.observedAt = customerDiscoveryAt;
+    });
+    input.assignments.customerReview.confirmation.observedAt = new Date(now - 2500).toISOString();
+    refreshCustomerReview(input);
     const discoveryAt = new Date(now - 2000).toISOString();
     input.assignments.discovery.observedAt = discoveryAt;
     input.assignments.discovery.records[0].signals.forEach(item => { item.observedAt = discoveryAt; });
@@ -242,6 +287,7 @@ test('GUID case does not change exact identity or membership', () => {
   const raw = JSON.stringify(input).replaceAll('10000000', 'abcdefab');
   const changed = JSON.parse(raw);
   changed.identity.userId = withLetters(input.identity.userId);
+  refreshCustomerReview(changed);
   refreshCandidateSet(changed);
   assert.equal(planDealTeams(changed, { now }).status, 'planned');
 });
@@ -319,6 +365,18 @@ test('partial source coverage is reported and never implied to cover all custome
     source.kind === 'm365-engagement' && source.status === 'unavailable'));
 });
 
+test('partial customer-name discovery remains visible after a complete exact-account read', () => {
+  const input = evidence();
+  input.assignments.customerReview.discovery.sources.find(source => source.kind === 'account-team').status = 'partial';
+  refreshCustomerReview(input);
+  const ranked = refreshCandidateSet(input);
+  const result = planDealTeams(input, { now });
+  assert.equal(ranked.scopeComplete, false);
+  assert.equal(result.status, 'planned');
+  assert.equal(result.candidateReview.scopeComplete, false);
+  assert.equal(result.candidateReview.customerReview.scopeComplete, false);
+});
+
 test('preliminary customer review ranks unresolved names without granting account confirmation', () => {
   const input = customerEvidence();
   input.discovery.sources.find(source => source.kind === 'account-team').status = 'partial';
@@ -371,6 +429,115 @@ test('preliminary customer selection cannot authorize the exact-account planner'
   blocked(namesAsDiscovery, /unexpected or missing fields/);
 });
 
+const invalidCustomerReviewCases = [
+  ['missing name review', input => { delete input.assignments.customerReview; }, /object required|unexpected or missing fields/],
+  ['changed name list', input => {
+    input.assignments.customerReview.discovery.records[0].customerName = 'Changed customer';
+  }, /name list changed/],
+  ['name confirmation of another user', input => {
+    input.assignments.customerReview.confirmation.userId = id(8);
+  }, /another user/],
+  ['stale name confirmation', input => {
+    input.assignments.customerReview.confirmation.observedAt = new Date(now - 86400001).toISOString();
+  }, /stale/],
+  ['future name confirmation', input => {
+    input.assignments.customerReview.confirmation.observedAt = new Date(now + 1).toISOString();
+  }, /future/],
+  ['name confirmation before discovery', input => {
+    input.assignments.customerReview.confirmation.observedAt = new Date(now - 1).toISOString();
+  }, /before customer discovery/],
+  ['exact discovery before name selection', input => {
+    input.assignments.discovery.observedAt = new Date(now - 1).toISOString();
+  }, /predates customer-name confirmation/],
+  ['unreviewed customer selected', input => {
+    input.assignments.customerReview.confirmation.selectedCustomerIds = ['not-reviewed'];
+  }, /customer was not reviewed/],
+  ['duplicate customer selection', input => {
+    input.assignments.customerReview.confirmation.selectedCustomerIds.push('fixture-customer');
+  }, /duplicate/],
+  ['unselected customer mapped', input => {
+    input.assignments.customerReview.confirmation.selectedCustomerIds = [];
+  }, /customer was not selected/],
+  ['selected customer without a mapping', input => {
+    input.assignments.customerReview.accountMappings = [];
+  }, /every selected customer must be resolved/],
+  ['candidate without a customer mapping', input => {
+    input.assignments.customerReview.accountMappings[0].accountId = id(8);
+  }, /no selected customer mapping/],
+  ['mapped account missing from review', input => {
+    input.assignments.customerReview.accountMappings.push({ customerId: 'fixture-customer', accountId: id(8) });
+  }, /every mapped account must be reviewed/],
+  ['duplicate mapped account', input => {
+    input.assignments.customerReview.accountMappings.push({ customerId: 'fixture-customer', accountId: id(4) });
+  }, /duplicate/],
+];
+
+for (const [name, change, reason] of invalidCustomerReviewCases) {
+  test(`exact-account ranking and planning block ${name}`, () => {
+    const input = evidence();
+    change(input);
+    const ranked = rankCandidates({
+      expectedIdentity: input.expectedIdentity,
+      identity: input.identity,
+      customerReview: input.assignments.customerReview,
+      discovery: input.assignments.discovery,
+    }, { now });
+    assert.equal(ranked.status, 'blocked');
+    assert.match(ranked.reason, reason);
+    blocked(input, reason);
+  });
+}
+
+test('name selection and account mapping are bound to the exact-account review', () => {
+  const input = evidence();
+  input.assignments.customerReview.discovery.records.push({
+    customerId: 'second-customer', customerName: 'Second Customer',
+    signals: [signal('account-owner', { recordId: id(10) })],
+  });
+  input.assignments.customerReview.confirmation.selectedCustomerIds.push('second-customer');
+  input.assignments.customerReview.accountMappings.push({
+    customerId: 'second-customer', accountId: id(8),
+  });
+  input.assignments.discovery.records.push({
+    accountId: id(8), accountName: 'Second CRM account', active: true,
+    signals: [signal('account-owner', { recordId: id(10) })],
+  });
+  refreshCustomerReview(input);
+  const initial = refreshCandidateSet(input);
+  const reordered = structuredClone(input);
+  reordered.assignments.customerReview.confirmation.selectedCustomerIds.reverse();
+  reordered.assignments.customerReview.accountMappings.reverse();
+  assert.equal(refreshCandidateSet(reordered).candidateSetId, initial.candidateSetId);
+  reordered.assignments.customerReview.accountMappings[0].customerId = 'fixture-customer';
+  reordered.assignments.customerReview.accountMappings[1].customerId = 'second-customer';
+  const changed = rankCandidates({
+    expectedIdentity: reordered.expectedIdentity,
+    identity: reordered.identity,
+    customerReview: reordered.assignments.customerReview,
+    discovery: reordered.assignments.discovery,
+  }, { now });
+  assert.equal(changed.status, 'candidates');
+  assert.notEqual(changed.candidateSetId, initial.candidateSetId);
+  blocked(reordered, /candidate list changed/);
+});
+
+test('no customer names selected yields an empty plan, not an assignment claim', () => {
+  const input = evidence();
+  input.assignments.customerReview.confirmation.selectedCustomerIds = [];
+  input.assignments.customerReview.accountMappings = [];
+  input.assignments.discovery.records = [];
+  input.assignments.confirmation.selectedAccountIds = [];
+  input.assignments.accounts.records = [];
+  input.opportunities.records = [];
+  refreshCandidateSet(input);
+  const result = planDealTeams(input, { now });
+  assert.equal(result.status, 'planned');
+  assert.equal(result.candidateReview.customerReview.candidateCount, 1);
+  assert.equal(result.candidateReview.customerReview.selectedCustomerCount, 0);
+  assert.equal(result.verifiedAccountCount, 0);
+  assert.deepEqual(result.proposals, []);
+});
+
 const invalidCustomerCases = [
   ['wrong signal user', input => { input.discovery.records[0].signals[0].userId = id(8); }, /another user/],
   ['duplicate ID', input => { input.discovery.records.push(structuredClone(input.discovery.records[0])); }, /duplicate/],
@@ -408,6 +575,9 @@ test('candidate fingerprints are order-independent and bind identity, evidence a
     accountId: id(8), accountName: 'Another customer', active: true,
     signals: [signal('account-team', { strength: 'unknown' })],
   });
+  input.assignments.customerReview.accountMappings.push({
+    customerId: 'fixture-customer', accountId: id(8),
+  });
   const initial = refreshCandidateSet(input);
   assert.deepEqual(initial.candidates.map(candidate => candidate.accountId), [id(4), id(8)]);
   const reordered = structuredClone(input);
@@ -425,8 +595,11 @@ test('candidate fingerprints are order-independent and bind identity, evidence a
 test('only explicitly selected accounts can contribute opportunities, regardless of score', () => {
   const input = evidence();
   input.assignments.discovery.records.push({
-    accountId: id(8), accountName: 'Unconfirmed customer', active: true,
+    accountId: id(8), accountName: 'Fixture Customer alternate entity', active: true,
     signals: [signal('account-owner'), signal('opportunity-team'), signal('open-opportunity')],
+  });
+  input.assignments.customerReview.accountMappings.push({
+    customerId: 'fixture-customer', accountId: id(8),
   });
   const ranked = refreshCandidateSet(input);
   assert.equal(ranked.candidates[0].accountId, id(8));
@@ -488,6 +661,7 @@ for (const [name, change, reason] of invalidCandidateCases) {
     const result = rankCandidates({
       expectedIdentity: input.expectedIdentity,
       identity: input.identity,
+      customerReview: input.assignments.customerReview,
       discovery: input.assignments.discovery,
     }, { now });
     assert.equal(result.status, 'blocked');
@@ -515,6 +689,7 @@ test('JSON CLI ranks fresh candidates without granting approval', async () => {
     const input = evidence();
     const observedAt = new Date().toISOString();
     input.identity.observedAt = observedAt;
+    refreshCustomerReviewTime(input, observedAt);
     input.assignments.discovery.observedAt = observedAt;
     for (const candidate of input.assignments.discovery.records) {
       for (const item of candidate.signals) item.observedAt = observedAt;
@@ -523,6 +698,7 @@ test('JSON CLI ranks fresh candidates without granting approval', async () => {
     await writeFile(file, JSON.stringify({
       expectedIdentity: input.expectedIdentity,
       identity: input.identity,
+      customerReview: input.assignments.customerReview,
       discovery: input.assignments.discovery,
     }));
     const script = fileURLToPath(new URL('../../skills/verify-customer-deal-teams/scripts/plan.mjs', import.meta.url));
@@ -606,6 +782,7 @@ test('JSON CLI emits exactly one successful pending proposal from fresh evidence
     for (const key of ['identity', 'opportunities', 'memberships']) {
       input[key].observedAt = observedAt;
     }
+    refreshCustomerReviewTime(input, observedAt);
     input.assignments.accounts.observedAt = observedAt;
     input.assignments.discovery.observedAt = observedAt;
     input.assignments.confirmation.observedAt = observedAt;
@@ -614,6 +791,7 @@ test('JSON CLI emits exactly one successful pending proposal from fresh evidence
     }
     const ranked = rankCandidates({
       expectedIdentity: input.expectedIdentity, identity: input.identity,
+      customerReview: input.assignments.customerReview,
       discovery: input.assignments.discovery,
     });
     assert.equal(ranked.status, 'candidates');
