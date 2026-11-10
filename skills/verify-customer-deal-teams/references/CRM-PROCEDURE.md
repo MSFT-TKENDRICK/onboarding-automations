@@ -102,8 +102,11 @@ node skills\verify-customer-deal-teams\scripts\plan.mjs --customers <absolute-ev
 Show every candidate, its heuristic score, supporting and conflicting evidence,
 and partial/unavailable sources; ask which named customers are assigned to the
 user. Record the actual answer, its elicitation/session reference, review time,
-and `customerSetId`. If the list changes or expires after 24 hours, rerank and
-ask again. The fingerprint detects changes; it does not authenticate a response.
+and `customerSetId`. Each signal's `observedAt` is its read time and must be no
+more than 24 hours old, even if the discovery itself is newer. A historical
+event may be older if its source was read recently. If any signal or the list
+expires, or if the list changes, refresh the evidence, rerank, and ask again.
+The fingerprint detects changes; it does not authenticate a response.
 The result reports `grantsAssignment: false` and
 `requiresExactAccountReview: true`. This preliminary answer selects neither a
 CRM GUID nor permission to plan or write. Resolve each selected name and obtain
@@ -127,10 +130,11 @@ The helper ranks normalized evidence; it does not fetch anything or verify a
 human response. Store its input/output outside the repository. Include the
 unchanged name-level discovery object, the actual name-level selection, and
 the account mappings in `customerReview`. Replace the placeholder below with
-the actual discovery object, not a string. Exact-account discovery must be read
-after name confirmation. Supply every source kind below exactly once, including
-unavailable sources. Every signal must be linked to the authenticated user and
-the exact candidate account, with a source and record identifier; only a
+the actual discovery object, not a string. Exact-account discovery and every
+exact-account signal must be read no earlier than name confirmation. Supply
+every source kind below exactly once, including unavailable sources. Every signal
+must be linked to the authenticated user and the exact candidate account, with
+a source and record identifier; only a
 `user-provided` signal may have a null `recordId`. Summaries describe the
 evidence, not raw email, chat text, credentials, or instructions. `observedAt`
 is the read time, not an invented event date.
@@ -207,10 +211,11 @@ list they reviewed. The exact-account fingerprint also binds the prior
 name-review fingerprint, selection, and name-to-account mappings. The hashes
 detect changed normalized evidence; they do not authenticate responses. The
 harness must obtain both real responses and never manufacture them from a
-caller-supplied JSON file, a score, or a previous run. Both reviews must be no
-more than 24 hours old, and each confirmation must follow its discovery; if
-either list changes or expires, rerank and ask again. Re-read the selected
-accounts and current CRM state before use.
+caller-supplied JSON file, a score, or a previous run. Both reviews and each
+signal read must be no more than 24 hours old, and each confirmation must follow
+its discovery; if either list or any signal expires, refresh the evidence,
+rerank, and ask again. Re-read the selected accounts and current CRM state before
+use.
 
 ## Opportunities and membership
 

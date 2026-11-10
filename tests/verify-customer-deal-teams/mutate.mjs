@@ -15,6 +15,8 @@ const mutations = [
   ['fresh evidence', 'at <= now && now - at <= MAX_AGE_MS', 'true'],
   ['post-confirmation reads', 'at >= notBefore', 'true'],
   ['candidate signal user', "guid(signal.userId, 'candidate signal user') === userId", 'true'],
+  ['candidate signal freshness', 'now - observedAt <= MAX_REVIEW_AGE_MS', 'true'],
+  ['exact signal follows name review', 'observedAt >= notBefore', 'true'],
   ['customer confirmation fingerprint', 'confirmation.customerSetId === ranked.customerSetId', 'true'],
   ['customer confirmation user', "guid(confirmation.userId, 'customer confirmation user') === identity.userId", 'true'],
   ['customer confirmation follows discovery',

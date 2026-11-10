@@ -7,7 +7,7 @@ description: >-
   pipeline coverage, and opportunity activity attribution.
 metadata:
   category: onboarding
-  version: "1.3.0"
+  version: "1.3.1"
 ---
 
 # Verified customer deal teams
@@ -25,7 +25,8 @@ metadata:
    WorkIQ/M365 engagement. Exhaust supported pagination and disclose unavailable
    or partial sources. Unknown effective dates or assignment semantics lower a
    signal's strength; they do not prevent candidate discovery. Neither a source
-   record nor a score proves assignment.
+   record nor a score proves assignment. Each signal's read time must be within
+   24 hours; an older underlying event may still be reported as historical.
 4. Always run `scripts/plan.mjs --customers` and ask the user which named
    customers are assigned to them, even when every CRM match is unambiguous.
    Show every name, score, evidence, contradictory signals, and incomplete
@@ -35,7 +36,8 @@ metadata:
 5. Resolve exact active CRM account GUIDs for the selected names, without
    guessing among duplicate records or expanding to related accounts. Present
    distinguishing evidence when a user must disambiguate. Stop if a selected
-   customer cannot be resolved; do not silently discard or merge names.
+   customer cannot be resolved; do not silently discard or merge names. Re-read
+   exact-account signals no earlier than the customer-name confirmation.
 6. Normalize the exact-account evidence and run `scripts/plan.mjs --candidates`
    with the reviewed name set, actual name selection, and explicit mappings
    from selected names to candidate account GUIDs, as documented in the
