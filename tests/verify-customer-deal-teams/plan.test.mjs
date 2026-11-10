@@ -434,6 +434,10 @@ const invalidCustomerReviewCases = [
   ['changed name list', input => {
     input.assignments.customerReview.discovery.records[0].customerName = 'Changed customer';
   }, /name list changed/],
+  ['stale signal in the name review', input => {
+    input.assignments.customerReview.discovery.records[0].signals[0].observedAt =
+      new Date(now - 86400001).toISOString();
+  }, /candidate signal: stale evidence/],
   ['name confirmation of another user', input => {
     input.assignments.customerReview.confirmation.userId = id(8);
   }, /another user/],
@@ -449,6 +453,9 @@ const invalidCustomerReviewCases = [
   ['exact discovery before name selection', input => {
     input.assignments.discovery.observedAt = new Date(now - 1).toISOString();
   }, /predates customer-name confirmation/],
+  ['exact signal read before name selection', input => {
+    input.assignments.discovery.records[0].signals[0].observedAt = new Date(now - 1).toISOString();
+  }, /candidate signal: read predates customer-name confirmation/],
   ['unreviewed customer selected', input => {
     input.assignments.customerReview.confirmation.selectedCustomerIds = ['not-reviewed'];
   }, /customer was not reviewed/],
@@ -553,6 +560,9 @@ const invalidCustomerCases = [
   ['signal after discovery', input => {
     input.discovery.records[0].signals[0].observedAt = new Date(now + 1).toISOString();
   }, /after discovery/],
+  ['stale signal in a fresh discovery', input => {
+    input.discovery.records[0].signals[0].observedAt = new Date(now - 86400001).toISOString();
+  }, /candidate signal: stale evidence/],
   ['stale discovery', input => { input.discovery.observedAt = new Date(now - 86400001).toISOString(); }, /stale/],
   ['future discovery', input => { input.discovery.observedAt = new Date(now + 1).toISOString(); }, /future/],
   ['stale identity', input => { input.identity.observedAt = new Date(now - 300001).toISOString(); }, /stale/],
@@ -568,6 +578,18 @@ for (const [name, change, reason] of invalidCustomerCases) {
     assert.match(result.reason, reason);
   });
 }
+
+test('customer evidence expires at its oldest signal even when discovery remains fresh', () => {
+  const input = customerEvidence();
+  input.discovery.records[0].signals[0].observedAt = new Date(now - 86400000).toISOString();
+  assert.equal(rankCustomerCandidates(input, { now }).status, 'customer-candidates');
+
+  input.identity.observedAt = new Date(now + 1).toISOString();
+  const result = rankCustomerCandidates(input, { now: now + 1 });
+  assert.equal(result.status, 'blocked');
+  assert.deepEqual(result.candidates, []);
+  assert.match(result.reason, /candidate signal: stale evidence/);
+});
 
 test('candidate fingerprints are order-independent and bind identity, evidence and scores', () => {
   const input = evidence();
@@ -643,6 +665,9 @@ const invalidCandidateCases = [
   ['signal after discovery', input => {
     input.assignments.discovery.records[0].signals[0].observedAt = new Date(now + 1).toISOString();
   }, /after discovery/],
+  ['stale signal in a fresh discovery', input => {
+    input.assignments.discovery.records[0].signals[0].observedAt = new Date(now - 86400001).toISOString();
+  }, /candidate signal: stale evidence/],
   ['open opportunity without an association', input => {
     input.assignments.discovery.records[0].signals = [signal('open-opportunity')];
   }, /association signal/],

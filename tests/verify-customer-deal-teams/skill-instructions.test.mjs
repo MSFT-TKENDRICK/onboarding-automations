@@ -9,9 +9,12 @@ test('skill requires name selection before exact account confirmation', async ()
     '../../skills/verify-customer-deal-teams/references/CRM-PROCEDURE.md', import.meta.url), 'utf8');
   assert.match(skill, /Always run `scripts\/plan\.mjs --customers`[\s\S]*even when every CRM match is unambiguous/);
   assert.match(skill, /preliminary[\s\S]*name-level selection is not this confirmation/i);
+  assert.match(skill, /Each signal's read time must be within\s+24 hours/i);
+  assert.match(skill, /exact-account signals no earlier than the customer-name confirmation/i);
   assert.doesNotMatch(skill, /if no preliminary review was necessary/i);
   assert.match(procedure, /Always review the discovered customer names before exact-account ranking/);
   assert.match(procedure, /Do not use the exact-account ranking or planner until the user has answered/);
+  assert.match(procedure, /Exact-account discovery and every\s+exact-account signal must be read no earlier than name confirmation/i);
   assert.match(procedure, /hashes[\s\S]*do not authenticate responses/i);
   assert.match(procedure, /do not retrieve denied data[\s\S]*another tool, account, or transport/i);
 });

@@ -131,7 +131,7 @@ function readDiscovery(discovery, now) {
   return { discoveredAt, sourceStatuses, sources };
 }
 
-function rankSignals(rawSignals, sourceStatuses, userId, discoveredAt, label) {
+function rankSignals(rawSignals, sourceStatuses, userId, discoveredAt, now, label, notBefore) {
   requireThat(Array.isArray(rawSignals) && rawSignals.length > 0 && rawSignals.length <= 100,
     `${label}: bounded signals required`);
   const contributions = new Map();
@@ -146,8 +146,12 @@ function rankSignals(rawSignals, sourceStatuses, userId, discoveredAt, label) {
     if (signal.kind !== 'user-provided' || signal.recordId !== null) {
       text(signal.recordId, 'candidate signal record ID');
     }
-    requireThat(timestamp(signal.observedAt, 'candidate signal.observedAt') <= discoveredAt,
-      'candidate signal: observed after discovery');
+    const observedAt = timestamp(signal.observedAt, 'candidate signal.observedAt');
+    requireThat(observedAt <= discoveredAt, 'candidate signal: observed after discovery');
+    requireThat(now - observedAt <= MAX_REVIEW_AGE_MS, 'candidate signal: stale evidence');
+    if (notBefore !== undefined) {
+      requireThat(observedAt >= notBefore, 'candidate signal: read predates customer-name confirmation');
+    }
     requireThat(Object.hasOwn(STRENGTH, signal.strength), 'candidate signal: invalid strength');
     text(signal.summary, 'candidate signal summary');
     const points = Math.round(SIGNAL_WEIGHTS[signal.kind] * STRENGTH[signal.strength]);
@@ -189,7 +193,8 @@ function collectCandidates(discovery, customerReview, identity, now) {
     requireThat(typeof row.active === 'boolean', 'candidate account: active state required');
     return {
       accountId, accountName: row.accountName, active: row.active, ...mappedCustomer,
-      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'candidate account'),
+      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, now, 'candidate account',
+        reviewedCustomers.confirmedAt),
     };
   });
   requireThat(accountIds.size === reviewedCustomers.accounts.size,
@@ -223,7 +228,7 @@ function collectCustomerCandidates(discovery, { tenantId, userId }, now) {
     text(row.customerName, 'customer name');
     return {
       customerId: id, customerName: row.customerName,
-      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'customer candidate'),
+      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, now, 'customer candidate'),
     };
   });
   const canonical = [...candidates].sort((left, right) => compare(left.customerId, right.customerId));
