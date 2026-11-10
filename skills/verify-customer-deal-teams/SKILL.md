@@ -1,13 +1,13 @@
 ---
 name: verify-customer-deal-teams
 description: >-
-  Verify the signed-in user's current customer account assignments from authoritative
-  CRM records, find existing open opportunities, and prepare self-add deal-team
-  changes for explicit human approval. Use for assigned customers, missing deal-team
-  membership, personal pipeline coverage, and opportunity activity attribution.
+  Discover and score candidate customer accounts, ask the signed-in user which are
+  assigned to them, and find missing deal-team memberships on existing opportunities.
+  Prepare self-adds for explicit human approval. Use for assigned customers, personal
+  pipeline coverage, and opportunity activity attribution.
 metadata:
   category: onboarding
-  version: "1.0.0"
+  version: "1.1.0"
 ---
 
 # Verified customer deal teams
@@ -20,34 +20,44 @@ metadata:
    the run's independently established expected identity, and resolve the user's
    role. Never infer identity from a display name, an email mention, GitHub
    identity, the active Azure subscription, or a cached account list.
-3. Discover account-team schema and relationships live. Read current active
-   assignments scoped to the exact user. Require an unambiguous relationship to
-   exact account GUIDs and effective dates. Unknown assignment semantics, missing
-   fields, stale reads, conflicting records, or incomplete pagination block the
-   run. Email, meetings, vault notes, existing opportunity membership, shared
-   territories, similar customer names, and confidence scores do not prove
-   assignment.
-4. Read existing open opportunities for those exact account GUIDs, and active
-   deal-team memberships for those exact opportunity GUIDs and user. Do not
-   expand to parent/child accounts or match by customer name/TPID alone.
-5. Normalize only those live results into the contract documented in the
-   procedure. Run `scripts/plan.mjs` with evidence stored outside the repository.
-   The helper is an offline consistency checker, not an authority or a credential.
-   A caller-supplied JSON file cannot itself prove customer assignment.
-6. Present the proposed self-adds with resolved customer, opportunity, user, role,
-   assignment record IDs, read timestamps, and expected effect. Existing members
-   are no-ops. Never promise that membership alone guarantees sales credit or
-   activity attribution.
-7. Leave proposals pending when unattended. For each explicitly approved item,
-   re-read identity, assignment, opportunity state/account, and membership
-   immediately before the write; run the planner again. If anything changed,
-   discard the approval and proposal. Invoke the provider's `dataverse_write`
-   elicitation, never auto-approve it or replace it with direct HTTP.
-8. Re-read membership after the approved write. Record `verified-added` only if
+3. Discover candidate accounts from account-team and owner records, opportunity
+   ownership and deal-team memberships, milestone ownership, and available
+   WorkIQ/M365 engagement. Resolve exact account GUIDs, exhaust supported
+   pagination, and disclose unavailable or partial sources. Unknown effective
+   dates or assignment semantics lower a signal's strength; they do not prevent
+   candidate discovery. Neither a source record nor a score proves assignment.
+4. Normalize the live evidence and run `scripts/plan.mjs --candidates` as
+   documented in the procedure. Present every ranked candidate with its score,
+   evidence, contradictory signals, and incomplete source coverage. Scores are
+   uncalibrated heuristics, not probabilities or authorization.
+5. Ask the user which accounts are accurately assigned to them, using a
+   multi-select or individual questions. A user-supplied missing account must be
+   resolved to an exact GUID and included in a new review. Never answer on the
+   user's behalf. If the user is unavailable or the answer is unclear, stop
+   with the selection pending. Only explicitly selected accounts proceed.
+6. Bind the real human response to the reviewed candidate set as described in
+   the procedure. Re-read those exact active accounts, their existing open
+   opportunities, and active deal-team memberships. Do not expand to related
+   accounts or match by name/TPID alone. Incomplete account, opportunity, or
+   membership reads block proposals; partial candidate discovery remains visible.
+7. Run `scripts/plan.mjs --input` with evidence outside the repository. This
+   offline helper checks consistency; a JSON file or a candidate-set hash is
+   neither proof of a human response nor permission to write.
+8. Present the proposed self-adds with customer, opportunity, user, role,
+   confirmation evidence, and read timestamps. Existing members are no-ops.
+   Never promise membership alone guarantees sales credit or activity attribution.
+9. Leave proposals pending when unattended. Immediately before each write,
+   re-read identity, confirmed account, opportunity state/account, and
+   membership and run the planner again. If the reviewed account or scope
+   changes, obtain a new user selection. Discard changed proposals and show any
+   revised proposal before approval; skip an opportunity if membership now exists.
+   Invoke the provider's `dataverse_write` elicitation for each write; never
+   auto-approve or replace it with direct HTTP.
+10. Re-read membership after the approved write. Record `verified-added` only if
    the exact user is active on the exact opportunity. On a timeout/lost response,
    record `unknown` and reconcile read-only; never blindly retry. Never remove
    anyone, change ownership, create opportunities, or fabricate activities.
-9. Keep an audit report outside Git with completed, already-member, blocked,
+11. Keep an audit report outside Git with completed, already-member, blocked,
    pending-approval, and unknown outcomes. Include evidence IDs/times, but no
    credentials or raw mail/chat content. Report partial/incomplete scope
    explicitly; never report all customers covered after a bounded/truncated read.

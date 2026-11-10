@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { open } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -7,6 +8,23 @@ const ISO = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,3})?(?:Z|[+-]\d{2}:\d
 const ROLES = new Set(['AE', 'Specialist', 'SE', 'CSA', 'CSAM', 'ATS', 'IA', 'ATU Sales Director']);
 const MAX_BYTES = 8 * 1024 * 1024;
 const MAX_AGE_MS = 5 * 60 * 1000;
+const MAX_REVIEW_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_KINDS = [
+  'account-team', 'account-owner', 'opportunity-owner', 'opportunity-team',
+  'open-opportunity', 'milestone-owner', 'm365-engagement',
+];
+const SIGNAL_WEIGHTS = {
+  'account-team': 50,
+  'account-owner': 50,
+  'opportunity-owner': 40,
+  'opportunity-team': 55,
+  'open-opportunity': 20,
+  'milestone-owner': 20,
+  'm365-engagement': 15,
+  'coverage-transition': -5,
+  'user-provided': 0,
+};
+const STRENGTH = { current: 1, unknown: 0.5, historical: 0.25 };
 
 function requireThat(condition, reason) {
   if (!condition) throw new Error(reason);
@@ -45,16 +63,19 @@ function timestamp(value, label) {
   return parsed;
 }
 
-function fresh(value, now, label) {
+function fresh(value, now, label, notBefore) {
   const at = timestamp(value, label);
   requireThat(at <= now && now - at <= MAX_AGE_MS, `${label}: stale or future evidence`);
+  if (notBefore !== undefined) {
+    requireThat(at >= notBefore, `${label}: read predates account confirmation`);
+  }
   return at;
 }
 
-function snapshot(value, now, label) {
+function snapshot(value, now, label, notBefore) {
   object(value, ['complete', 'observedAt', 'records'], label);
   requireThat(value.complete === true, `${label}: complete authoritative read required`);
-  fresh(value.observedAt, now, `${label}.observedAt`);
+  fresh(value.observedAt, now, `${label}.observedAt`, notBefore);
   requireThat(Array.isArray(value.records) && value.records.length <= 5000, `${label}: record budget exceeded`);
   return value.records;
 }
@@ -64,48 +85,190 @@ function unique(set, id, label) {
   set.add(id);
 }
 
+function compare(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+function resolveIdentity(expected, identity, now) {
+  object(expected, ['tenantId', 'userId'], 'expectedIdentity');
+  const tenantId = guid(expected.tenantId, 'expected tenant');
+  const userId = guid(expected.userId, 'expected user');
+  object(identity, ['tenantId', 'userId', 'displayName', 'role', 'active', 'observedAt'], 'identity');
+  requireThat(guid(identity.tenantId, 'tenant') === tenantId
+    && guid(identity.userId, 'user') === userId, 'authenticated identity mismatch');
+  requireThat(identity.active === true, 'authenticated user is not active');
+  requireThat(ROLES.has(identity.role), 'unresolved role');
+  text(identity.displayName, 'user name');
+  fresh(identity.observedAt, now, 'identity.observedAt');
+  return { tenantId, userId };
+}
+
+function collectCandidates(discovery, { tenantId, userId }, now) {
+  object(discovery, ['observedAt', 'sources', 'records'], 'candidate discovery');
+  const discoveredAt = timestamp(discovery.observedAt, 'candidate discovery.observedAt');
+  requireThat(discoveredAt <= now && now - discoveredAt <= MAX_REVIEW_AGE_MS,
+    'candidate discovery: stale or future evidence');
+  requireThat(Array.isArray(discovery.sources) && discovery.sources.length === SOURCE_KINDS.length,
+    'candidate discovery: every source status required');
+  const sourceStatuses = new Map();
+  for (const source of discovery.sources) {
+    object(source, ['kind', 'status'], 'candidate source');
+    requireThat(SOURCE_KINDS.includes(source.kind), 'candidate source: unknown kind');
+    requireThat(!sourceStatuses.has(source.kind), 'candidate source: duplicate kind');
+    requireThat(['complete', 'partial', 'unavailable'].includes(source.status), 'candidate source: invalid status');
+    sourceStatuses.set(source.kind, source.status);
+  }
+  requireThat(SOURCE_KINDS.every(kind => sourceStatuses.has(kind)), 'candidate discovery: missing source status');
+  const sources = SOURCE_KINDS.map(kind => ({ kind, status: sourceStatuses.get(kind) }));
+  requireThat(Array.isArray(discovery.records) && discovery.records.length <= 5000,
+    'candidate discovery: record budget exceeded');
+  const accountIds = new Set();
+  const candidates = discovery.records.map(row => {
+    object(row, ['accountId', 'accountName', 'active', 'signals'], 'candidate');
+    const accountId = guid(row.accountId, 'candidate account');
+    unique(accountIds, accountId, 'candidate account');
+    text(row.accountName, 'candidate account name');
+    requireThat(typeof row.active === 'boolean', 'candidate account: active state required');
+    requireThat(Array.isArray(row.signals) && row.signals.length > 0 && row.signals.length <= 100,
+      'candidate account: bounded signals required');
+    const contributions = new Map();
+    const signals = row.signals.map(signal => {
+      object(signal, ['kind', 'source', 'recordId', 'userId', 'observedAt', 'strength', 'summary'], 'candidate signal');
+      requireThat(Object.hasOwn(SIGNAL_WEIGHTS, signal.kind), 'candidate signal: unknown kind');
+      requireThat(guid(signal.userId, 'candidate signal user') === userId, 'candidate signal belongs to another user');
+      if (SOURCE_KINDS.includes(signal.kind)) {
+        requireThat(sourceStatuses.get(signal.kind) !== 'unavailable', 'candidate signal: source marked unavailable');
+      }
+      text(signal.source, 'candidate signal source');
+      if (signal.kind !== 'user-provided' || signal.recordId !== null) {
+        text(signal.recordId, 'candidate signal record ID');
+      }
+      requireThat(timestamp(signal.observedAt, 'candidate signal.observedAt') <= discoveredAt,
+        'candidate signal: observed after discovery');
+      requireThat(Object.hasOwn(STRENGTH, signal.strength), 'candidate signal: invalid strength');
+      text(signal.summary, 'candidate signal summary');
+      const points = Math.round(SIGNAL_WEIGHTS[signal.kind] * STRENGTH[signal.strength]);
+      const previous = contributions.get(signal.kind);
+      if (previous === undefined || (points >= 0 ? points > previous : points < previous)) {
+        contributions.set(signal.kind, points);
+      }
+      return {
+        kind: signal.kind, source: signal.source, recordId: signal.recordId,
+        userId, observedAt: signal.observedAt, strength: signal.strength, summary: signal.summary,
+      };
+    }).sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right)));
+    requireThat(signals.some(signal => signal.kind !== 'open-opportunity' && signal.kind !== 'coverage-transition'),
+      'candidate account: an association signal is required');
+    const reasons = [...contributions].sort(([left], [right]) => compare(left, right))
+      .map(([kind, points]) => ({ kind, points }));
+    const confidence = Math.max(0, Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)));
+    return { accountId, accountName: row.accountName, active: row.active, confidence, reasons, signals };
+  });
+  const canonical = [...candidates].sort((left, right) => compare(left.accountId, right.accountId));
+  const candidateSetId = `sha256:${createHash('sha256').update(JSON.stringify({
+    tenantId, userId, observedAt: discovery.observedAt, sources, candidates: canonical,
+  })).digest('hex')}`;
+  return {
+    status: 'candidates',
+    candidateSetId,
+    observedAt: discovery.observedAt,
+    scopeComplete: sources.every(source => source.status === 'complete'),
+    sources,
+    candidates: candidates.sort((left, right) =>
+      right.confidence - left.confidence
+      || compare(left.accountName, right.accountName)
+      || compare(left.accountId, right.accountId)),
+  };
+}
+
+/**
+ * Rank collected signals for human review; scores are heuristics, not assignment proof.
+ */
+export function rankCandidates(input, { now = Date.now() } = {}) {
+  try {
+    requireThat(Number.isFinite(now), 'invalid clock');
+    object(input, ['expectedIdentity', 'identity', 'discovery'], 'candidate evidence');
+    return collectCandidates(input.discovery, resolveIdentity(input.expectedIdentity, input.identity, now), now);
+  } catch (error) {
+    return { status: 'blocked', reason: error.message, candidates: [] };
+  }
+}
+
+function confirmedAssignments(assignments, identity, now) {
+  object(assignments, ['source', 'discovery', 'accounts', 'confirmation'], 'assignments');
+  requireThat(assignments.source === 'user-confirmed-candidates', 'assignments: user confirmation required');
+  const ranked = collectCandidates(assignments.discovery, identity, now);
+  const confirmation = object(assignments.confirmation,
+    ['candidateSetId', 'userId', 'observedAt', 'selectedAccountIds'], 'confirmation');
+  requireThat(confirmation.candidateSetId === ranked.candidateSetId, 'confirmation: candidate list changed');
+  requireThat(guid(confirmation.userId, 'confirmation user') === identity.userId, 'confirmation belongs to another user');
+  const confirmedAt = timestamp(confirmation.observedAt, 'confirmation.observedAt');
+  requireThat(confirmedAt >= timestamp(ranked.observedAt, 'candidate discovery.observedAt')
+    && confirmedAt <= now && now - confirmedAt <= MAX_REVIEW_AGE_MS,
+  'confirmation: stale, future, or before candidate discovery');
+  requireThat(Array.isArray(confirmation.selectedAccountIds) && confirmation.selectedAccountIds.length <= 5000,
+    'confirmation: selected account budget exceeded');
+  const selected = new Set();
+  const candidateById = new Map(ranked.candidates.map(candidate => [candidate.accountId, candidate]));
+  for (const rawId of confirmation.selectedAccountIds) {
+    const accountId = guid(rawId, 'confirmed account');
+    unique(selected, accountId, 'confirmed account');
+    requireThat(candidateById.has(accountId), 'confirmation: account was not reviewed');
+  }
+  const assigned = new Map();
+  for (const row of snapshot(assignments.accounts, now, 'confirmed accounts', confirmedAt)) {
+    object(row, ['accountId', 'accountName', 'active'], 'confirmed account');
+    const accountId = guid(row.accountId, 'confirmed account');
+    requireThat(selected.has(accountId), 'account read includes an unconfirmed account');
+    requireThat(!assigned.has(accountId), 'confirmed account: duplicate/conflicting record ID');
+    const candidate = candidateById.get(accountId);
+    requireThat(candidate.active === true && row.active === true, 'confirmed account is not active');
+    requireThat(text(row.accountName, 'account name') === candidate.accountName,
+      'confirmed account identity changed after review');
+    assigned.set(accountId, {
+      accountName: row.accountName,
+      assignmentIds: [],
+      assignmentEvidence: {
+        method: 'user-confirmed-candidates',
+        candidateSetId: ranked.candidateSetId,
+        confirmedAt: confirmation.observedAt,
+        confidence: candidate.confidence,
+      },
+    });
+  }
+  requireThat(assigned.size === selected.size, 'confirmed accounts: complete read of every selection required');
+  return {
+    assigned,
+    observedAt: assignments.accounts.observedAt,
+    confirmedAt,
+    review: {
+      candidateSetId: ranked.candidateSetId,
+      candidateCount: ranked.candidates.length,
+      confirmedAccountCount: selected.size,
+      confirmedAt: confirmation.observedAt,
+      scopeComplete: ranked.scopeComplete,
+      sources: ranked.sources,
+    },
+  };
+}
+
 /**
  * Validate normalized live evidence and produce pending proposals only.
- * This checks consistency, not provenance; the harness must collect authoritative
- * records itself and must never treat an uploaded evidence file as trusted.
+ * This checks consistency, not provenance; the harness must collect live records
+ * and a real human response, not treat an uploaded evidence file as either.
  */
 export function planDealTeams(input, { now = Date.now() } = {}) {
   try {
     requireThat(Number.isFinite(now), 'invalid clock');
     object(input, ['expectedIdentity', 'identity', 'assignments', 'opportunities', 'memberships'], 'evidence');
-    object(input.expectedIdentity, ['tenantId', 'userId'], 'expectedIdentity');
-    const tenantId = guid(input.expectedIdentity.tenantId, 'expected tenant');
-    const userId = guid(input.expectedIdentity.userId, 'expected user');
-    const identity = object(input.identity,
-      ['tenantId', 'userId', 'displayName', 'role', 'active', 'observedAt'], 'identity');
-    requireThat(guid(identity.tenantId, 'tenant') === tenantId
-      && guid(identity.userId, 'user') === userId, 'authenticated identity mismatch');
-    requireThat(identity.active === true, 'authenticated user is not active');
-    requireThat(ROLES.has(identity.role), 'unresolved role');
-    text(identity.displayName, 'user name');
-    fresh(identity.observedAt, now, 'identity.observedAt');
-
-    const assigned = new Map();
-    const assignmentIds = new Set();
-    for (const row of snapshot(input.assignments, now, 'assignments')) {
-      object(row, ['id', 'userId', 'accountId', 'accountName', 'active', 'validFrom', 'validUntil'], 'assignment');
-      const id = guid(row.id, 'assignment ID');
-      unique(assignmentIds, id, 'assignment');
-      requireThat(guid(row.userId, 'assignment user') === userId, 'assignment belongs to another user');
-      const accountId = guid(row.accountId, 'assignment account');
-      text(row.accountName, 'account name');
-      requireThat(row.active === true, 'inactive assignment in current coverage');
-      const start = row.validFrom === null ? -Infinity : timestamp(row.validFrom, 'assignment start');
-      const end = row.validUntil === null ? Infinity : timestamp(row.validUntil, 'assignment end');
-      requireThat(start < end && start <= now && now < end, 'assignment is not currently effective');
-      const existing = assigned.get(accountId);
-      requireThat(!existing || existing.accountName === row.accountName, 'conflicting account identity');
-      if (existing) existing.assignmentIds.push(id);
-      else assigned.set(accountId, { accountName: row.accountName, assignmentIds: [id] });
-    }
+    const identity = input.identity;
+    const { tenantId, userId } = resolveIdentity(input.expectedIdentity, identity, now);
+    const confirmation = confirmedAssignments(input.assignments, { tenantId, userId }, now);
+    const assigned = confirmation.assigned;
+    fresh(identity.observedAt, now, 'identity.observedAt', confirmation.confirmedAt);
 
     const opportunities = new Map();
-    for (const row of snapshot(input.opportunities, now, 'opportunities')) {
+    for (const row of snapshot(input.opportunities, now, 'opportunities', confirmation.confirmedAt)) {
       object(row, ['id', 'accountId', 'name', 'state'], 'opportunity');
       const id = guid(row.id, 'opportunity ID');
       requireThat(!opportunities.has(id), 'duplicate/conflicting opportunity ID');
@@ -118,7 +281,7 @@ export function planDealTeams(input, { now = Date.now() } = {}) {
 
     const members = new Set();
     const membershipIds = new Set();
-    for (const row of snapshot(input.memberships, now, 'memberships')) {
+    for (const row of snapshot(input.memberships, now, 'memberships', confirmation.confirmedAt)) {
       object(row, ['id', 'userId', 'opportunityId', 'active'], 'membership');
       unique(membershipIds, guid(row.id, 'membership ID'), 'membership');
       requireThat(guid(row.userId, 'membership user') === userId, 'membership belongs to another user');
@@ -147,14 +310,20 @@ export function planDealTeams(input, { now = Date.now() } = {}) {
         opportunityId: opportunity.id,
         opportunityName: opportunity.name,
         assignmentIds: [...assignment.assignmentIds].sort(),
+        assignmentEvidence: assignment.assignmentEvidence,
       });
     }
     return {
       status: 'planned',
       generatedAt: new Date(now).toISOString(),
-      observedAt: Object.fromEntries(['identity', 'assignments', 'opportunities', 'memberships']
-        .map(key => [key, input[key].observedAt])),
+      observedAt: {
+        identity: input.identity.observedAt,
+        assignments: confirmation.observedAt,
+        opportunities: input.opportunities.observedAt,
+        memberships: input.memberships.observedAt,
+      },
       verifiedAccountCount: assigned.size,
+      candidateReview: confirmation.review,
       alreadyMember,
       proposals,
       writesPerformed: 0,
@@ -168,7 +337,8 @@ export function planDealTeams(input, { now = Date.now() } = {}) {
 
 export async function main(args) {
   try {
-    requireThat(args.length === 2 && args[0] === '--input', 'usage: plan.mjs --input <evidence.json>');
+    requireThat(args.length === 2 && ['--input', '--candidates'].includes(args[0]),
+      'usage: plan.mjs --input|--candidates <evidence.json>');
     const file = await open(resolve(args[1]), 'r');
     let input;
     try {
@@ -185,7 +355,8 @@ export async function main(args) {
     } finally {
       await file.close();
     }
-    const result = planDealTeams(JSON.parse(input.toString('utf8')));
+    const evidence = JSON.parse(input.toString('utf8'));
+    const result = args[0] === '--candidates' ? rankCandidates(evidence) : planDealTeams(evidence);
     console.log(JSON.stringify(result));
     return result.status === 'blocked' ? 2 : 0;
   } catch (error) {

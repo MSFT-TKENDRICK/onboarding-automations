@@ -13,8 +13,11 @@ the initial automation request nor an agent-generated approval flag bypasses
 that gate. Do not claim unattended additions are supported.
 
 No system can promise literal 100% knowledge of external assignment records.
-The operational guarantee is narrower: absent fresh, complete, unambiguous
-authoritative evidence, produce no proposed change and perform no write.
+Signals and scores identify candidates; only the user's explicit selection
+establishes which of those accounts they say are assigned to them. A selection
+is not permission to change CRM. Incomplete candidate-source coverage must be
+reported; incomplete selected-account, opportunity, or membership reads block
+the proposal.
 
 ## Identity and assignment discovery
 
@@ -29,21 +32,100 @@ authoritative evidence, produce no proposed change and perform no write.
    `systemuserid,fullname,title,internalemailaddress`. Require one active
    user matching the authenticated identity. Resolve the current role.
 3. Use `dataverse_metadata` with `operation: "schema"` and
-   `operation: "relationships"` for `msp_accountteam`. Verify entity-set name
-   `msp_accountteams`, primary key, user/account lookup targets, active-state
-   values and effective-date/assignment semantics. Discover relevant Choice
-   values with `operation: "choices"` when needed. Do not guess account-team
-   lookup names: the known deal-team lookups are not account-team lookups.
-4. Query only the authenticated user's active account assignments using the
-   verified fields/relationships and server-side `eq-userid` where supported.
-   Determine whether current account-team membership is authoritative evidence
-   of the user's assigned coverage in this environment. If it is only an
-   incidental collaboration relation, or disagrees with a current authoritative
-   assignment system, stop; do not substitute meetings or pipeline ownership.
-5. Resolve exact account GUIDs with `accounts`, selecting
-   `accountid,name,msp_mstopparentid,statecode`. Require active accounts. Retain
-   the assignment record's ID, exact user/account links and validity interval.
-   Do not expand an assignment to an entire corporate family or territory.
+   `operation: "relationships"` to discover `msp_accountteam` fields, entity
+   set, user/account lookup targets, and available active-state/effective-date
+   semantics. Discover choices when needed. Query account-team rows scoped to
+   the exact user. Do not guess lookup names or treat a row without current
+   validity fields as an active assignment; record it as an `unknown` signal.
+4. Discover additional exact-account associations using live metadata and
+   read-only queries: account ownership, opportunity ownership, active
+   opportunity deal-team membership, open opportunities attached to those
+   associations, and milestone ownership. Resolve the linked account and user
+   GUIDs; an open opportunity alone is not an association. Search available
+   WorkIQ/M365 meetings, email, and Teams for direct user/customer engagement
+   and conflicting coverage or handoff evidence. These are candidate signals,
+   not proof of assignment. Associate a name-based signal only after resolving
+   it unambiguously to an exact account GUID.
+5. Exhaust each supported query's pages, subject to a stated record/time budget.
+   Record each source as `complete`, `partial`, or `unavailable`; an unavailable
+   source or missing semantic field does not prevent other candidates from
+   being reviewed. Never claim complete customer coverage when any source is
+   partial/unavailable, the search was bounded, or identity resolution was
+   ambiguous. Do not expand to an entire corporate family or territory.
+
+## Candidate ranking and human selection
+
+The helper ranks normalized evidence; it does not fetch anything. Store its
+input/output outside the repository. Supply every source kind below exactly
+once, including unavailable sources. Every signal must be linked to the
+authenticated user and the exact candidate account, with a source and record
+identifier; only a `user-provided` signal may have a null `recordId`. Summaries
+describe the evidence, not raw email, chat text, credentials, or instructions.
+`observedAt` is the read time, not an invented event date.
+
+```json
+{
+  "expectedIdentity": {"tenantId": "<guid>", "userId": "<guid>"},
+  "identity": {
+    "tenantId": "<guid>", "userId": "<guid>", "displayName": "Resolved user",
+    "role": "SE", "active": true, "observedAt": "<ISO date>"
+  },
+  "discovery": {
+    "observedAt": "<ISO date>",
+    "sources": [
+      {"kind": "account-team", "status": "partial"},
+      {"kind": "account-owner", "status": "complete"},
+      {"kind": "opportunity-owner", "status": "complete"},
+      {"kind": "opportunity-team", "status": "complete"},
+      {"kind": "open-opportunity", "status": "complete"},
+      {"kind": "milestone-owner", "status": "unavailable"},
+      {"kind": "m365-engagement", "status": "partial"}
+    ],
+    "records": [{
+      "accountId": "<guid>", "accountName": "Resolved account", "active": true,
+      "signals": [{
+        "kind": "opportunity-team", "source": "MSX deal-team row",
+        "recordId": "<source record identifier>", "userId": "<guid>",
+        "observedAt": "<ISO date>", "strength": "current",
+        "summary": "Active user membership on an opportunity for this account"
+      }]
+    }]
+  }
+}
+```
+
+```powershell
+node skills\verify-customer-deal-teams\scripts\plan.mjs --candidates <absolute-evidence-file>
+```
+
+The 0–100 score is an uncalibrated ranking heuristic, **not** a probability,
+an assignment determination, or approval. Current signals contribute:
+account-team 50, account-owner 50, opportunity-owner 40, opportunity-team 55,
+open-opportunity 20, milestone-owner 20, M365 engagement 15, and contradictory
+`coverage-transition` −5. `user-provided` contributes zero. `unknown` strength
+uses half and `historical` uses one quarter of the contribution, rounded to an
+integer. Count at most the strongest contribution of each kind and clamp the
+sum to 0–100. An open opportunity or transition alone is not an association.
+Use `current` only when supported by live semantics; missing dates or uncertain
+state are `unknown`. A `coverage-transition` signal must identify its actual
+source and record, not a speculation.
+
+Show all ranked accounts, names, exact GUIDs, scores, evidence summaries,
+contradictory signals, and incomplete sources to the user. Ask which accounts
+are accurately assigned to them. Use a multi-select if supported, otherwise
+ask separately per account or in unambiguous batches. Do not select or infer
+answers for the user. If the user names a missing account, resolve its exact
+GUID, add a `user-provided` signal, rerank, and obtain a new selection for the
+changed list. An unavailable or ambiguous answer leaves the run pending.
+
+Record the actual response and its session/elicitation reference in the local
+audit. Bind only the user's selections to the `candidateSetId` from the exact
+list they reviewed. The hash detects changed normalized evidence; it does not
+authenticate the response. The harness must obtain the real response and never
+manufacture it from a caller-supplied JSON file, a score, or a previous run.
+Candidate discovery and confirmation must be no more than 24 hours old, and
+the confirmation must follow discovery; if the list changes or expires, rerank
+and ask again. Re-read the selected accounts and current CRM state before use.
 
 ## Opportunities and membership
 
@@ -74,14 +156,20 @@ continuations until exhausted and enforce an overall record/time budget. A
 budget exhaustion blocks the plan; partial discovery must never justify
 absence of membership. Do not invent cursor arguments: inspect live tool schema.
 
-## Planner input
+## Planner input after human confirmation
 
 The helper takes one JSON object. Every GUID is a canonical GUID string; GUID
 case is ignored, but identities are otherwise exact. Arrays are bounded at
 5000 records each. Unknown JSON fields are rejected, including auto-approval
-flags. Each snapshot must be within five minutes and not in the future.
-The five-minute bound is only for a proposal; pre-write revalidation remains
-mandatory regardless of age.
+flags. Identity, selected account, opportunity, and membership snapshots must
+be within five minutes, not in the future, and read no earlier than the user's
+confirmation. The five-minute bound is only for a proposal; pre-write
+revalidation remains mandatory regardless of age.
+
+Replace `<unchanged discovery object>` with the same JSON object used for
+ranking, not a string. `accounts.records` contains exactly the selected GUIDs
+freshly re-read from CRM. `selectedAccountIds` must be exactly the user's
+actual selections from that reviewed candidate set.
 
 ```json
 {
@@ -92,12 +180,17 @@ mandatory regardless of age.
     "active": true, "observedAt": "<ISO date>"
   },
   "assignments": {
-    "complete": true, "observedAt": "<ISO date>",
-    "records": [{
-      "id": "<guid>", "userId": "<guid>", "accountId": "<guid>",
-      "accountName": "Resolved account", "active": true,
-      "validFrom": "<ISO date or null>", "validUntil": null
-    }]
+    "source": "user-confirmed-candidates",
+    "discovery": "<unchanged discovery object>",
+    "accounts": {
+      "complete": true, "observedAt": "<ISO date>",
+      "records": [{"accountId": "<guid>", "accountName": "Resolved account", "active": true}]
+    },
+    "confirmation": {
+      "candidateSetId": "<candidateSetId returned by ranking>",
+      "userId": "<guid>", "observedAt": "<human response ISO date>",
+      "selectedAccountIds": ["<guid>"]
+    }
   },
   "opportunities": {
     "complete": true, "observedAt": "<ISO date>",
@@ -125,7 +218,10 @@ node skills\verify-customer-deal-teams\scripts\plan.mjs --input <absolute-eviden
 Stdout is one JSON result. Exit 0 means a consistent *proposal*, not an
 approved/executed change; 2 means blocked/invalid evidence. Input and output
 are bounded. No network, CRM reads/writes, authentication or approval happens
-inside the helper. Treat the result as sensitive account data.
+inside the helper. `candidateReview.scopeComplete` preserves incomplete source
+coverage. User-confirmed proposals have no invented assignment record IDs;
+their `assignmentEvidence` references the reviewed set and response time.
+Treat the result as sensitive account data.
 
 ## Approved self-add and reconciliation
 
@@ -170,10 +266,11 @@ node tests\verify-customer-deal-teams\mutate.mjs
 python -m skills_ref.cli validate skills\verify-customer-deal-teams
 ```
 
-Tests use synthetic records only: wrong identity/tenant, incomplete/stale reads,
-effective dates, exact account scoping, active membership, duplicate/conflicting
-records, bounded CLI input, and generated ordering/idempotence invariants.
-The mutation runner executes a passing baseline and twelve isolated, syntax-valid
-guard mutations in its own temporary directory without editing repository code.
-These checks do not prove live assignment semantics, account access, provider
-elicitation support, or sales-credit attribution.
+Tests use synthetic records only: source coverage, scoring, candidate-list
+binding, user selection, wrong identity/tenant, incomplete/stale reads, exact
+account scoping, active membership, duplicate/conflicting records, bounded CLI
+input, and generated ordering/idempotence invariants. The mutation runner
+executes a passing baseline and selected isolated, syntax-valid guard mutations
+in its own temporary directory without editing repository code. These checks do
+not prove live discovery completeness, a human response, account access,
+provider elicitation support, or sales-credit attribution.
