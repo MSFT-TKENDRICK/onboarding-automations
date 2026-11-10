@@ -11,7 +11,7 @@
 | [`check-github-access`](skills/check-github-access/SKILL.md) | Checks the selected GitHub identity and specified repositories, without changing access. |
 | [`check-msx-access`](skills/check-msx-access/SKILL.md) | Guides MS Sales access requests and separately checks corporate SSO and MSX tooling. |
 | [`new-hire-readiness`](skills/new-hire-readiness/SKILL.md) | Combines the GitHub and MSX checks and identifies onboarding areas that still require verification. Install both sibling checks with it. |
-| [`verify-customer-deal-teams`](skills/verify-customer-deal-teams/SKILL.md) | Discovers and scores customer candidates from CRM and available M365 signals, reviews ambiguous names before exact-account confirmation, and prepares missing self-adds on existing open opportunities. Scores never prove assignment; additions require fresh revalidation and the provider's per-write human approval. |
+| [`verify-customer-deal-teams`](skills/verify-customer-deal-teams/SKILL.md) | Discovers and scores customer candidates from CRM and available M365 signals, always reviews names before separate exact-account confirmation, and prepares missing self-adds on existing open opportunities. Scores never prove assignment; additions require fresh revalidation and the provider's per-write human approval. |
 
 ## Requirements
 

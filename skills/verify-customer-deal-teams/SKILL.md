@@ -7,7 +7,7 @@ description: >-
   pipeline coverage, and opportunity activity attribution.
 metadata:
   category: onboarding
-  version: "1.2.0"
+  version: "1.3.0"
 ---
 
 # Verified customer deal teams
@@ -26,20 +26,22 @@ metadata:
    or partial sources. Unknown effective dates or assignment semantics lower a
    signal's strength; they do not prevent candidate discovery. Neither a source
    record nor a score proves assignment.
-4. If customer names cannot all be resolved unambiguously to CRM accounts, run
-   `scripts/plan.mjs --customers` and ask the user which named customers are
-   assigned to them. Show every name, score, evidence, contradictory signals,
-   and incomplete source coverage. This preliminary review does not select or
-   confirm any CRM account and cannot authorize planning or writes. Preserve
-   the real response and reviewed set; never infer or manufacture an answer.
+4. Always run `scripts/plan.mjs --customers` and ask the user which named
+   customers are assigned to them, even when every CRM match is unambiguous.
+   Show every name, score, evidence, contradictory signals, and incomplete
+   source coverage. This preliminary review does not select or confirm any CRM
+   account and cannot authorize planning or writes. Preserve the real response
+   and reviewed set; never infer or manufacture an answer.
 5. Resolve exact active CRM account GUIDs for the selected names, without
    guessing among duplicate records or expanding to related accounts. Present
-   distinguishing evidence when a user must disambiguate. If no preliminary
-   review was necessary, resolve all candidates directly.
+   distinguishing evidence when a user must disambiguate. Stop if a selected
+   customer cannot be resolved; do not silently discard or merge names.
 6. Normalize the exact-account evidence and run `scripts/plan.mjs --candidates`
-   as documented in the procedure. Present every ranked account with its exact
-   GUID, score, evidence, contradictory signals, and incomplete source coverage.
-   Scores are uncalibrated heuristics, not probabilities or authorization.
+   with the reviewed name set, actual name selection, and explicit mappings
+   from selected names to candidate account GUIDs, as documented in the
+   procedure. Present every ranked account with its exact GUID, score,
+   evidence, contradictory signals, and incomplete source coverage. Scores are
+   uncalibrated heuristics, not probabilities or authorization.
 7. Ask the user which exact accounts are accurately assigned to them, using a
    multi-select or individual questions. A user-supplied missing account must be
    resolved to an exact GUID and included in a new review. A preliminary

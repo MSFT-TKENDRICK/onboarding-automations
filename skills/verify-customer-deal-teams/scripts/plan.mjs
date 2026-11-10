@@ -49,6 +49,12 @@ function text(value, label) {
   return value;
 }
 
+function customerId(value, label) {
+  requireThat(typeof value === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value), `${label}: invalid ID`);
+  return value;
+}
+
 function timestamp(value, label) {
   requireThat(typeof value === 'string' && ISO.test(value), `${label}: ISO timestamp required`);
   const parsed = Date.parse(value);
@@ -166,29 +172,39 @@ function scopeComplete(sources) {
   return sources.every(source => source.status === 'complete');
 }
 
-function collectCandidates(discovery, { tenantId, userId }, now) {
+function collectCandidates(discovery, customerReview, identity, now) {
+  const { tenantId, userId } = identity;
+  const reviewedCustomers = validateCustomerReview(customerReview, identity, now);
   const { discoveredAt, sourceStatuses, sources } = readDiscovery(discovery, now);
+  requireThat(discoveredAt >= reviewedCustomers.confirmedAt,
+    'candidate discovery: read predates customer-name confirmation');
   const accountIds = new Set();
   const candidates = discovery.records.map(row => {
     object(row, ['accountId', 'accountName', 'active', 'signals'], 'candidate');
     const accountId = guid(row.accountId, 'candidate account');
     unique(accountIds, accountId, 'candidate account');
+    const mappedCustomer = reviewedCustomers.accounts.get(accountId);
+    requireThat(mappedCustomer !== undefined, 'candidate account: no selected customer mapping');
     text(row.accountName, 'candidate account name');
     requireThat(typeof row.active === 'boolean', 'candidate account: active state required');
     return {
-      accountId, accountName: row.accountName, active: row.active,
+      accountId, accountName: row.accountName, active: row.active, ...mappedCustomer,
       ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'candidate account'),
     };
   });
+  requireThat(accountIds.size === reviewedCustomers.accounts.size,
+    'customer mapping: every mapped account must be reviewed');
   const canonical = [...candidates].sort((left, right) => compare(left.accountId, right.accountId));
   const candidateSetId = `sha256:${createHash('sha256').update(JSON.stringify({
-    tenantId, userId, observedAt: discovery.observedAt, sources, candidates: canonical,
+    tenantId, userId, customerReview: reviewedCustomers.binding,
+    observedAt: discovery.observedAt, sources, candidates: canonical,
   })).digest('hex')}`;
   return {
     status: 'candidates',
     candidateSetId,
     observedAt: discovery.observedAt,
-    scopeComplete: scopeComplete(sources),
+    scopeComplete: reviewedCustomers.review.scopeComplete && scopeComplete(sources),
+    customerReview: reviewedCustomers.review,
     sources,
     candidates: candidates.sort((left, right) =>
       right.confidence - left.confidence
@@ -202,12 +218,11 @@ function collectCustomerCandidates(discovery, { tenantId, userId }, now) {
   const customerIds = new Set();
   const candidates = discovery.records.map(row => {
     object(row, ['customerId', 'customerName', 'signals'], 'customer candidate');
-    requireThat(typeof row.customerId === 'string'
-      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.customerId), 'customer candidate: invalid ID');
-    unique(customerIds, row.customerId, 'customer candidate');
+    const id = customerId(row.customerId, 'customer candidate');
+    unique(customerIds, id, 'customer candidate');
     text(row.customerName, 'customer name');
     return {
-      customerId: row.customerId, customerName: row.customerName,
+      customerId: id, customerName: row.customerName,
       ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'customer candidate'),
     };
   });
@@ -232,14 +247,74 @@ function collectCustomerCandidates(discovery, { tenantId, userId }, now) {
   };
 }
 
+function validateCustomerReview(review, identity, now) {
+  object(review, ['discovery', 'confirmation', 'accountMappings'], 'customer review');
+  const ranked = collectCustomerCandidates(review.discovery, identity, now);
+  const confirmation = object(review.confirmation,
+    ['customerSetId', 'userId', 'observedAt', 'selectedCustomerIds'], 'customer confirmation');
+  requireThat(confirmation.customerSetId === ranked.customerSetId, 'customer confirmation: name list changed');
+  requireThat(guid(confirmation.userId, 'customer confirmation user') === identity.userId,
+    'customer confirmation belongs to another user');
+  const nameConfirmedAt = timestamp(confirmation.observedAt, 'customer confirmation.observedAt');
+  requireThat(nameConfirmedAt >= timestamp(ranked.observedAt, 'customer discovery.observedAt')
+    && nameConfirmedAt <= now && now - nameConfirmedAt <= MAX_REVIEW_AGE_MS,
+  'customer confirmation: stale, future, or before customer discovery');
+  requireThat(Array.isArray(confirmation.selectedCustomerIds) && confirmation.selectedCustomerIds.length <= 5000,
+    'customer confirmation: selected customer budget exceeded');
+  const selected = new Set();
+  const candidates = new Map(ranked.candidates.map(candidate => [candidate.customerId, candidate]));
+  for (const rawId of confirmation.selectedCustomerIds) {
+    const id = customerId(rawId, 'confirmed customer');
+    unique(selected, id, 'confirmed customer');
+    requireThat(candidates.has(id), 'customer confirmation: customer was not reviewed');
+  }
+  requireThat(Array.isArray(review.accountMappings) && review.accountMappings.length <= 5000,
+    'customer mapping: account budget exceeded');
+  const accounts = new Map();
+  const resolvedCustomers = new Set();
+  for (const mapping of review.accountMappings) {
+    object(mapping, ['customerId', 'accountId'], 'customer mapping');
+    const id = customerId(mapping.customerId, 'mapped customer');
+    requireThat(selected.has(id), 'customer mapping: customer was not selected');
+    const accountId = guid(mapping.accountId, 'mapped account');
+    requireThat(!accounts.has(accountId), 'customer mapping: duplicate/conflicting account');
+    accounts.set(accountId, { customerId: id, customerName: candidates.get(id).customerName });
+    resolvedCustomers.add(id);
+  }
+  requireThat(resolvedCustomers.size === selected.size, 'customer mapping: every selected customer must be resolved');
+  const selectedCustomerIds = [...selected].sort(compare);
+  const accountMappings = [...accounts].map(([accountId, customer]) => ({
+    customerId: customer.customerId, accountId,
+  })).sort((left, right) => compare(left.accountId, right.accountId));
+  return {
+    accounts,
+    confirmedAt: nameConfirmedAt,
+    binding: {
+      customerSetId: ranked.customerSetId,
+      confirmedAt: confirmation.observedAt,
+      selectedCustomerIds,
+      accountMappings,
+    },
+    review: {
+      customerSetId: ranked.customerSetId,
+      candidateCount: ranked.candidates.length,
+      selectedCustomerCount: selected.size,
+      confirmedAt: confirmation.observedAt,
+      scopeComplete: ranked.scopeComplete,
+      sources: ranked.sources,
+    },
+  };
+}
+
 /**
  * Rank collected signals for human review; scores are heuristics, not assignment proof.
  */
 export function rankCandidates(input, { now = Date.now() } = {}) {
   try {
     requireThat(Number.isFinite(now), 'invalid clock');
-    object(input, ['expectedIdentity', 'identity', 'discovery'], 'candidate evidence');
-    return collectCandidates(input.discovery, resolveIdentity(input.expectedIdentity, input.identity, now), now);
+    object(input, ['expectedIdentity', 'identity', 'customerReview', 'discovery'], 'candidate evidence');
+    return collectCandidates(input.discovery, input.customerReview,
+      resolveIdentity(input.expectedIdentity, input.identity, now), now);
   } catch (error) {
     return { status: 'blocked', reason: error.message, candidates: [] };
   }
@@ -259,9 +334,9 @@ export function rankCustomerCandidates(input, { now = Date.now() } = {}) {
 }
 
 function confirmedAssignments(assignments, identity, now) {
-  object(assignments, ['source', 'discovery', 'accounts', 'confirmation'], 'assignments');
+  object(assignments, ['source', 'customerReview', 'discovery', 'accounts', 'confirmation'], 'assignments');
   requireThat(assignments.source === 'user-confirmed-candidates', 'assignments: user confirmation required');
-  const ranked = collectCandidates(assignments.discovery, identity, now);
+  const ranked = collectCandidates(assignments.discovery, assignments.customerReview, identity, now);
   const confirmation = object(assignments.confirmation,
     ['candidateSetId', 'userId', 'observedAt', 'selectedAccountIds'], 'confirmation');
   requireThat(confirmation.candidateSetId === ranked.candidateSetId, 'confirmation: candidate list changed');
@@ -294,6 +369,9 @@ function confirmedAssignments(assignments, identity, now) {
       assignmentIds: [],
       assignmentEvidence: {
         method: 'user-confirmed-candidates',
+        customerSetId: ranked.customerReview.customerSetId,
+        customerId: candidate.customerId,
+        customerConfirmedAt: ranked.customerReview.confirmedAt,
         candidateSetId: ranked.candidateSetId,
         confirmedAt: confirmation.observedAt,
         confidence: candidate.confidence,
@@ -311,6 +389,7 @@ function confirmedAssignments(assignments, identity, now) {
       confirmedAccountCount: selected.size,
       confirmedAt: confirmation.observedAt,
       scopeComplete: ranked.scopeComplete,
+      customerReview: ranked.customerReview,
       sources: ranked.sources,
     },
   };
