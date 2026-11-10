@@ -8,6 +8,10 @@
 | --- | --- |
 | [`request-new-azure-subscription`](skills/request-new-azure-subscription/SKILL.md) | Submits a new MCAPS, ESLabs, or internal Azure subscription request through the MCAPS Services portal and returns the support case ID. Uses a zero-dependency Node script that drives headless Edge over the DevTools protocol with your corporate SSO; see its [benchmarks](skills/request-new-azure-subscription/references/BENCHMARKS.md). |
 | [`request-new-github-repository`](skills/request-new-github-repository/SKILL.md) | Creates a new non-production GitHub EMU repository through StartRight, the sanctioned self-service path, and returns its URL. Refuses production, TCB and HVT code and points to GitHub Proxima. Contract-tested against a local mock: the live create call is never exercised by tests. |
+| [`check-github-access`](skills/check-github-access/SKILL.md) | Checks the selected GitHub identity and specified repositories, without changing access. |
+| [`check-msx-access`](skills/check-msx-access/SKILL.md) | Guides MS Sales access requests and separately checks corporate SSO and MSX tooling. |
+| [`new-hire-readiness`](skills/new-hire-readiness/SKILL.md) | Combines the GitHub and MSX checks and identifies onboarding areas that still require verification. Install both sibling checks with it. |
+| [`verify-customer-deal-teams`](skills/verify-customer-deal-teams/SKILL.md) | Discovers and scores customer candidates from CRM and available M365 signals, always reviews names before separate exact-account confirmation, and prepares missing self-adds on existing open opportunities. Scores never prove assignment; additions require fresh revalidation and the provider's per-write human approval. |
 
 ## Requirements
 
@@ -23,8 +27,11 @@ skills/
     references/       # Optional: detail loaded on demand
     scripts/          # Optional: executable helpers
     assets/           # Optional: templates and data
+plugin.json           # Portable Agent Plugins manifest
+.github/plugin/
+  marketplace.json    # Copilot marketplace for the onboarding plugin
 .claude-plugin/
-  marketplace.json    # Plugin marketplace manifest listing every skill
+  marketplace.json    # Legacy marketplace manifest listing every onboarding skill
 tests/
   <skill-name>/       # node:test unit tests, mock services, integration tests
 .github/workflows/
@@ -33,14 +40,34 @@ tests/
 
 ## Install
 
-Pick the option that matches your harness. Each skill is a self-contained directory, so you can install one or all of them.
+Pick the option that matches your harness. The `onboarding-skills` plugin contains all six onboarding skills,
+including the sibling checks needed by `new-hire-readiness`. Installing individual skill directories also requires
+installing both siblings.
 
-### Plugin marketplace (Claude Code, GitHub Copilot CLI)
+### GitHub Copilot plugin marketplace
 
-```text
-/plugin marketplace add MSFT-TKENDRICK/onboarding-automations
-/plugin install onboarding-skills@microsoft-onboarding
+After these changes reach the default branches, register the marketplaces and install either or both plugins:
+
+```sh
+copilot plugin marketplace add MSFT-TKENDRICK/onboarding-automations
+copilot plugin marketplace add MSFT-TKENDRICK/MS-COMMS-TUI
+copilot plugin install onboarding-skills@microsoft-onboarding
+copilot plugin install ms-comms-tui@ms-comms
 ```
+
+For unmerged previews, add these branch-specific sources instead:
+
+```sh
+copilot plugin marketplace add 'MSFT-TKENDRICK/onboarding-automations#feat/portable-skills-marketplace'
+copilot plugin marketplace add 'MSFT-TKENDRICK/MS-COMMS-TUI#feat/agent-skill'
+```
+
+The communications plugin is maintained in its own repository rather than copied here. It supplies guidance,
+not the CLI or credentials. Existing CLI setup and safe, non-interactive authentication are still required.
+
+Both plugin roots use the portable [Agent Plugins 1.0](https://agent-plugins.org/specification) manifest and
+standard `skills/` discovery. The legacy `.claude-plugin/marketplace.json` remains available for clients that
+use that marketplace format; it lists the onboarding skills only.
 
 ### Copy into a skills directory (any harness)
 
@@ -69,20 +96,55 @@ Ask your agent in plain language, for example:
 
 > Request a new ESLabs Azure subscription for my team's demo environment.
 
+> Check my GitHub and MSX onboarding readiness for the repositories my team uses.
+
 The harness matches the request to the skill's `description`, loads `SKILL.md`, and follows its steps. Skills that change anything on your behalf always confirm with you before they submit.
+
+An MS Sales access request does not require an Azure subscription or Azure CLI sign-in.
 
 ## Validate
 
 ```bash
+npm ci              # install the exact locked Node.js development dependencies
 pip install skills-ref
 python -m skills_ref.cli validate skills/request-new-azure-subscription
 python -m skills_ref.cli validate skills/request-new-github-repository
+python -m skills_ref.cli validate skills/check-github-access
+python -m skills_ref.cli validate skills/check-msx-access
+python -m skills_ref.cli validate skills/new-hire-readiness
+python -m skills_ref.cli validate skills/verify-customer-deal-teams
 npm test            # unit + end-to-end tests against local mock services (needs Edge/Chrome; skipped otherwise)
 npm run test:unit   # unit tests only
+npm run test:property  # deterministic generated invariants (seed 0x5eedc0de)
+npm run test:contracts # replay external-boundary and composed JSON contracts
+npm run test:mutation  # sequential targeted mutants; fails below 70%
+npm run test:crap      # CRAP metric; fails for functions above 30 or missing measurement
+npm run test:quality   # all quality gates above
 npm run bench       # plan timings against the mock portal
 ```
 
-CI runs the same checks on every skill and verifies that `.claude-plugin/marketplace.json` lists each one.
+CI validates every skill and the Agent Plugins manifest against its published schema, verifies that the legacy
+catalog lists each onboarding skill, and runs `npm test`, including the portable marketplace contract tests.
+The property, contract, mutation, and CRAP commands are explicit local gates; they are not silently included in CI.
+
+All Node test commands run with one worker and a unique `TEMP`/`TMP`/`TMPDIR`. Browser automation requests a graceful
+shutdown and cleans only the throwaway profile created by that run; it never sweeps other profiles. If Windows retains
+an isolated test directory after bounded cleanup, the test runner reports the path and exits nonzero. The readiness
+checks are unattended: they reuse only exact,
+already-authenticated account/profile matches, never start login or account selection, and report `unknown` while
+continuing other checks when identity, tooling, network, or provider evidence is unavailable.
+
+The consumer-side contract fixtures cover GitHub REST/`gh`, tenant-scoped Azure CLI token output, Dataverse `WhoAmI`, the read-only
+`msx_auth_status` MCP tool, StartRight response shapes, Azure request intent decisions, and the versioned JSON contract
+consumed by `new-hire-readiness`. They replay documented/provider fixtures through the real consumers; they do not
+claim independent live-provider verification. Contract drift fails closed rather than being interpreted as access.
+
+The CRAP gate uses the [crap4clj formula](https://github.com/unclebob/crap4clj#crap-formula)
+`CC² × (1 − coverage)³ + CC`, Acorn AST cyclomatic complexity, and V8 per-function source-range coverage. This
+approximates coverage from the unit suite using UTF-16 source offsets, excluding nested functions from their enclosing
+function; it does not measure code executed inside Chromium or by integration tests. It inventories every executable
+skill module, reports functions it cannot measure, and fails rather than treating missing coverage as success. Reports are written to ignored
+`quality-reports/`.
 
 ## Contributing
 

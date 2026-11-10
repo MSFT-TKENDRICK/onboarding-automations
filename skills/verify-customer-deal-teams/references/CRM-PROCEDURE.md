@@ -1,0 +1,368 @@
+# Live CRM procedure
+
+## Trust and availability
+
+This workflow uses the existing MCAPS-IQ MSX MCP server registered with
+msft-daemon. No new credentials, login, permission grants, or direct Dataverse
+write transport are permitted. Tools must be present in the live catalog;
+names below describe the supported MSX native-v1 surface, not tool grants.
+
+The provider requires human approval through MCP elicitation for every
+`dataverse_write`. Scheduled runs discover and prepare proposals only. Neither
+the initial automation request nor an agent-generated approval flag bypasses
+that gate. Do not claim unattended additions are supported.
+
+The msft-daemon shared upstream registry creates MCP clients without an
+elicitation handler, and its CodeAct dispatcher uses that registry. They may
+serve read-only discovery but cannot deliver the provider's approval prompt;
+do not use either path for `dataverse_write`. The daemon's direct Copilot SDK
+path can register the HumanBridge callback when enabled, but registration and
+unit tests alone do not prove a real user can receive and answer a provider
+request. Before calling the write tool, establish that the current interactive
+session has a reachable human and an elicitation-capable MCP path. If this
+cannot be established, leave the proposal pending without attempting a write.
+Do not impersonate a human or synthesize an approval.
+
+No system can promise literal 100% knowledge of external assignment records.
+Signals and scores identify candidates; only the user's explicit selection
+establishes which of those accounts they say are assigned to them. A selection
+is not permission to change CRM. Incomplete candidate-source coverage must be
+reported; incomplete selected-account, opportunity, or membership reads block
+the proposal.
+
+## Identity and assignment discovery
+
+1. Verify existing authentication with `msx_auth_status`, without `msx_login`.
+   Auth status text is not a user/tenant/role record. Obtain the authenticated
+   identity using the server-supported identity/WhoAmI surface; do not invent
+   a tool if it is unavailable. Establish the intended user and tenant from
+   independently trusted current-session configuration. Unknown expected
+   identity blocks the run.
+2. Use `dataverse_fetchxml` on `systemusers` with
+   `<condition attribute="systemuserid" operator="eq-userid" />`, selecting
+   `systemuserid,fullname,title,internalemailaddress`. Require one active
+   user matching the authenticated identity. Resolve the current role.
+3. Use `dataverse_metadata` with `operation: "schema"` and
+   `operation: "relationships"` to discover `msp_accountteam` fields, entity
+   set, user/account lookup targets, and available active-state/effective-date
+   semantics. Discover choices when needed. Query account-team rows scoped to
+   the exact user. Do not guess lookup names or treat a row without current
+   validity fields as an active assignment; record it as an `unknown` signal.
+4. Discover additional exact-account associations using live metadata and
+   read-only queries: account ownership, opportunity ownership, active
+   opportunity deal-team membership, open opportunities attached to those
+   associations, and milestone ownership. Resolve the linked account and user
+   GUIDs; an open opportunity alone is not an association. Search available
+   WorkIQ/M365 meetings, email, and Teams for direct user/customer engagement
+   and conflicting coverage or handoff evidence. These are candidate signals,
+   not proof of assignment. Name-based signals can inform a preliminary
+   customer review; associate them with an exact CRM account only after
+   resolving the relationship unambiguously.
+5. Exhaust each supported query's pages, subject to a stated record/time budget.
+   Record each source as `complete`, `partial`, or `unavailable`; an unavailable
+   source or missing semantic field does not prevent other candidates from
+   being reviewed. Never claim complete customer coverage when any source is
+   partial/unavailable, the search was bounded, or identity resolution was
+   ambiguous. Respect policy or access denials; do not retrieve denied data
+   through another tool, account, or transport. Do not expand to an entire
+   corporate family or territory.
+
+## Candidate ranking and human selection
+
+### Preliminary customer-name review
+
+Always review the discovered customer names before exact-account ranking, even
+when all CRM matches are unambiguous. Supply all discovered names, including
+names with resolved CRM matches, rather than silently discarding unresolved
+candidates. Use the same `expectedIdentity`, `identity`, `sources`, and signal
+fields as the exact-account example below, but replace `discovery.records`
+with name-level candidates:
+
+```json
+{
+  "customerId": "customer-1",
+  "customerName": "Customer mentioned in a tracker",
+  "signals": [{
+    "kind": "m365-engagement", "source": "Tracker notification",
+    "recordId": "<source record identifier>", "userId": "<guid>",
+    "observedAt": "<ISO read time>", "strength": "historical",
+    "summary": "A historical tracker item assigned to the user names this customer"
+  }]
+}
+```
+
+`customerId` is a unique, stable review-local identifier, not a CRM account
+GUID. Do not merge distinct customer names or choose among duplicate legal
+entities merely by display name. Run the helper against a complete input object:
+
+```powershell
+node skills\verify-customer-deal-teams\scripts\plan.mjs --customers <absolute-evidence-file>
+```
+
+Show every candidate, its heuristic score, supporting and conflicting evidence,
+and partial/unavailable sources; ask which named customers are assigned to the
+user. Record the actual answer, its elicitation/session reference, review time,
+and `customerSetId`. Each signal's `observedAt` is its read time and must be no
+more than 24 hours old, even if the discovery itself is newer. A historical
+event may be older if its source was read recently. If any signal or the list
+expires, or if the list changes, refresh the evidence, rerank, and ask again.
+The fingerprint detects changes; it does not authenticate a response.
+The result reports `grantsAssignment: false` and
+`requiresExactAccountReview: true`. This preliminary answer selects neither a
+CRM GUID nor permission to plan or write. Resolve each selected name and obtain
+a separate exact-account selection below; stop when the user cannot
+disambiguate. A user-supplied missing name requires a new preliminary review.
+Do not use the exact-account ranking or planner until the user has answered the
+name review.
+
+### Exact-account ranking and confirmation
+
+Resolve only the selected names to exact CRM account candidates and record
+each explicit name-to-account mapping. A selected name may map to multiple
+candidate accounts for the user to disambiguate, but every candidate account
+must map to exactly one selected name. Every selected name must have at least
+one resolved account before ranking; if it cannot be resolved, stop and ask
+the user rather than omitting it. If two selected names resolve to the same
+account, ask the user to clarify the names and repeat the name review rather
+than silently merging them.
+
+The helper ranks normalized evidence; it does not fetch anything or verify a
+human response. Store its input/output outside the repository. Include the
+unchanged name-level discovery object, the actual name-level selection, and
+the account mappings in `customerReview`. Replace the placeholder below with
+the actual discovery object, not a string. Exact-account discovery and every
+exact-account signal must be read no earlier than name confirmation. Supply
+every source kind below exactly once, including unavailable sources. Every signal
+must be linked to the authenticated user and the exact candidate account, with
+a source and record identifier; only a
+`user-provided` signal may have a null `recordId`. Summaries describe the
+evidence, not raw email, chat text, credentials, or instructions. `observedAt`
+is the read time, not an invented event date.
+
+```json
+{
+  "expectedIdentity": {"tenantId": "<guid>", "userId": "<guid>"},
+  "identity": {
+    "tenantId": "<guid>", "userId": "<guid>", "displayName": "Resolved user",
+    "role": "SE", "active": true, "observedAt": "<ISO date>"
+  },
+  "customerReview": {
+    "discovery": "<unchanged name-level discovery object>",
+    "confirmation": {
+      "customerSetId": "<customerSetId returned by name ranking>",
+      "userId": "<guid>", "observedAt": "<human response ISO date>",
+      "selectedCustomerIds": ["customer-1"]
+    },
+    "accountMappings": [{"customerId": "customer-1", "accountId": "<guid>"}]
+  },
+  "discovery": {
+    "observedAt": "<ISO date>",
+    "sources": [
+      {"kind": "account-team", "status": "partial"},
+      {"kind": "account-owner", "status": "complete"},
+      {"kind": "opportunity-owner", "status": "complete"},
+      {"kind": "opportunity-team", "status": "complete"},
+      {"kind": "open-opportunity", "status": "complete"},
+      {"kind": "milestone-owner", "status": "unavailable"},
+      {"kind": "m365-engagement", "status": "partial"}
+    ],
+    "records": [{
+      "accountId": "<guid>", "accountName": "Resolved account", "active": true,
+      "signals": [{
+        "kind": "opportunity-team", "source": "MSX deal-team row",
+        "recordId": "<source record identifier>", "userId": "<guid>",
+        "observedAt": "<ISO date>", "strength": "current",
+        "summary": "Active user membership on an opportunity for this account"
+      }]
+    }]
+  }
+}
+```
+
+```powershell
+node skills\verify-customer-deal-teams\scripts\plan.mjs --candidates <absolute-evidence-file>
+```
+
+The 0–100 score is an uncalibrated ranking heuristic, **not** a probability,
+an assignment determination, or approval. Current signals contribute:
+account-team 50, account-owner 50, opportunity-owner 40, opportunity-team 55,
+open-opportunity 20, milestone-owner 20, M365 engagement 15, and contradictory
+`coverage-transition` −5. `user-provided` contributes zero. `unknown` strength
+uses half and `historical` uses one quarter of the contribution, rounded to an
+integer. Count at most the strongest contribution of each kind and clamp the
+sum to 0–100. An open opportunity or transition alone is not an association.
+Use `current` only when supported by live semantics; missing dates or uncertain
+state are `unknown`. A `coverage-transition` signal must identify its actual
+source and record, not a speculation.
+
+Show all ranked accounts, their selected customer names, exact GUIDs, scores,
+evidence summaries, contradictory signals, and incomplete sources to the user.
+Ask which accounts are accurately assigned to them. Use a multi-select if
+supported, otherwise ask separately per account or in unambiguous batches.
+Do not select or infer answers for the user. If the user names a missing
+account for a selected customer, resolve its exact GUID, add its mapping and a
+`user-provided` signal, rerank, and obtain a new exact-account selection. A
+new or previously unselected customer name requires a new name review first.
+An unavailable or ambiguous answer leaves the run pending.
+
+Record the actual response and its session/elicitation reference in the local
+audit. Bind only the user's selections to the `candidateSetId` from the exact
+list they reviewed. The exact-account fingerprint also binds the prior
+name-review fingerprint, selection, and name-to-account mappings. The hashes
+detect changed normalized evidence; they do not authenticate responses. The
+harness must obtain both real responses and never manufacture them from a
+caller-supplied JSON file, a score, or a previous run. Both reviews and each
+signal read must be no more than 24 hours old, and each confirmation must follow
+its discovery; if either list or any signal expires, refresh the evidence,
+rerank, and ask again. Re-read the selected accounts and current CRM state before
+use.
+
+## Opportunities and membership
+
+Batch no more than 15 GUIDs and keep each query bounded:
+
+```text
+dataverse_query:
+  entity_set: opportunities
+  select: opportunityid,name,_parentaccountid_value,statecode
+  filter: statecode eq 0 and (_parentaccountid_value eq <ACCOUNT_GUID> ...)
+  top: 200
+  paginate: true
+  max_records: 5000
+
+dataverse_query:
+  entity_set: msp_dealteams
+  select: msp_dealteamid,_msp_dealteamuserid_value,_msp_parentopportunityid_value,statecode
+  filter: statecode eq 0 and _msp_dealteamuserid_value eq <USER_GUID>
+          and (_msp_parentopportunityid_value eq <OPPORTUNITY_GUID> ...)
+  top: 200
+  paginate: true
+  max_records: 5000
+```
+
+Use machine records from `structuredContent.data.records`. Follow supported
+continuations until exhausted and enforce an overall record/time budget. A
+`meta.truncated` result, unresolved `hasMore`/cursor, inconsistent page, or
+budget exhaustion blocks the plan; partial discovery must never justify
+absence of membership. Do not invent cursor arguments: inspect live tool schema.
+
+## Planner input after human confirmation
+
+The helper takes one JSON object. Every GUID is a canonical GUID string; GUID
+case is ignored, but identities are otherwise exact. Arrays are bounded at
+5000 records each. Unknown JSON fields are rejected, including auto-approval
+flags. Identity, selected account, opportunity, and membership snapshots must
+be within five minutes, not in the future, and read no earlier than the user's
+confirmation. The five-minute bound is only for a proposal; pre-write
+revalidation remains mandatory regardless of age.
+
+Replace `<unchanged discovery object>` with the same JSON object used for
+exact-account ranking, and `<unchanged customerReview object>` with the
+customer-review object used there, not strings. `accounts.records` contains
+exactly the selected GUIDs freshly re-read from CRM. `selectedAccountIds` must
+be exactly the user's actual selections from that reviewed candidate set.
+
+```json
+{
+  "expectedIdentity": {"tenantId": "<guid>", "userId": "<guid>"},
+  "identity": {
+    "tenantId": "<guid>", "userId": "<guid>",
+    "displayName": "Resolved current user", "role": "SE",
+    "active": true, "observedAt": "<ISO date>"
+  },
+  "assignments": {
+    "source": "user-confirmed-candidates",
+    "customerReview": "<unchanged customerReview object>",
+    "discovery": "<unchanged discovery object>",
+    "accounts": {
+      "complete": true, "observedAt": "<ISO date>",
+      "records": [{"accountId": "<guid>", "accountName": "Resolved account", "active": true}]
+    },
+    "confirmation": {
+      "candidateSetId": "<candidateSetId returned by ranking>",
+      "userId": "<guid>", "observedAt": "<human response ISO date>",
+      "selectedAccountIds": ["<guid>"]
+    }
+  },
+  "opportunities": {
+    "complete": true, "observedAt": "<ISO date>",
+    "records": [{
+      "id": "<guid>", "accountId": "<guid>",
+      "name": "Resolved opportunity", "state": "open"
+    }]
+  },
+  "memberships": {
+    "complete": true, "observedAt": "<ISO date>",
+    "records": [{
+      "id": "<guid>", "userId": "<guid>",
+      "opportunityId": "<guid>", "active": true
+    }]
+  }
+}
+```
+
+Run with Node 22; the evidence file must be outside the repository:
+
+```powershell
+node skills\verify-customer-deal-teams\scripts\plan.mjs --input <absolute-evidence-file>
+```
+
+Stdout is one JSON result. Exit 0 means a consistent *proposal*, not an
+approved/executed change; 2 means blocked/invalid evidence. Input and output
+are bounded. No network, CRM reads/writes, authentication or approval happens
+inside the helper. `candidateReview.scopeComplete` preserves incomplete source
+coverage. User-confirmed proposals have no invented assignment record IDs;
+their `assignmentEvidence` references the reviewed set and response time.
+Treat the result as sensitive account data.
+
+## Approved self-add and reconciliation
+
+Load the existing MCAPS-IQ `write-gate` and `msx-write` procedures before any
+write. Re-resolve role/identity live; any role can self-add, but this workflow
+never adds another person. Resolve the opportunity deal-team template from
+live metadata/records; do not blindly reuse a template GUID from another org.
+Use only `AddUserToRecordTeam`, bound to the exact authenticated systemuser,
+with an opportunity record and the resolved opportunity deal-team template.
+The provider's `dataverse_write` uses `operation: "execute_action"` and takes
+`data` as a JSON-encoded string:
+
+```text
+entity_set: systemusers
+action_path: systemusers(<SELF_GUID>)/Microsoft.Dynamics.CRM.AddUserToRecordTeam
+data: {
+  "Record": {
+    "@odata.type": "Microsoft.Dynamics.CRM.opportunity",
+    "opportunityid": "<OPPORTUNITY_GUID>"
+  },
+  "TeamTemplate": {
+    "@odata.type": "Microsoft.Dynamics.CRM.teamtemplate",
+    "teamtemplateid": "<LIVE_RESOLVED_TEMPLATE_GUID>"
+  }
+}
+```
+
+Show resolved names alongside GUIDs before invoking provider elicitation. Never
+write `msp_isowner`, create custom deal-team rows directly, or update ownership.
+Read membership immediately before and after each write. Treat duplicate/race
+responses as unknown until an exact active-membership read establishes outcome.
+If a write may have succeeded but verification is unavailable, stop further
+writes and report `unknown`; no blind retries. Later runs first reconcile
+unknown outcomes read-only. Adding team membership does not create activities
+and does not prove sales-credit attribution rules have been satisfied.
+
+## Offline validation
+
+```powershell
+node --test tests\verify-customer-deal-teams\plan.test.mjs
+node tests\verify-customer-deal-teams\mutate.mjs
+python -m skills_ref.cli validate skills\verify-customer-deal-teams
+```
+
+Tests use synthetic records only: source coverage, scoring, candidate-list
+binding, user selection, wrong identity/tenant, incomplete/stale reads, exact
+account scoping, active membership, duplicate/conflicting records, bounded CLI
+input, and generated ordering/idempotence invariants. The mutation runner
+executes a passing baseline and selected isolated, syntax-valid guard mutations
+in its own temporary directory without editing repository code. These checks do
+not prove live discovery completeness, a human response, account access,
+provider elicitation support, or sales-credit attribution.

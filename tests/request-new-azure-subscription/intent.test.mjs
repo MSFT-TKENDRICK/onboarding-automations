@@ -45,6 +45,19 @@ describe('decideIntent', () => {
     assert.equal(decideIntent({ ok: false, error: 'timeout' }, map).reason, 'no_answer');
     assert.equal(decideIntent(v({ o9: 0.99, none: 0.01 }), map).reason, 'unknown_key');
   });
+  it('refuses malformed confidence and margin values without coercion', () => {
+    const valid = { ok: true, choice: 'o1', p: 0.95, margin: 0.9 };
+    for (const field of ['p', 'margin']) {
+      for (const value of [undefined, null, NaN, Infinity, -Infinity, -0.01, 1.01, '0.95']) {
+        assert.deepEqual(decideIntent({ ...valid, [field]: value }, map),
+          { commit: false, reason: 'invalid_answer' }, `${field}: ${String(value)}`);
+      }
+    }
+    assert.equal(decideIntent({ ...valid, margin: 0.96 }, map).reason, 'invalid_answer');
+    assert.equal(decideIntent({ ...valid, ok: 'true' }, map).reason, 'no_answer');
+    assert.deepEqual(decideIntent({ ...valid, p: 0.9, margin: 0.3 }, map),
+      { commit: true, value: '1', p: 0.9 });
+  });
   it('only allows intent resolution for non-identity slots', () => {
     assert.deepEqual([...INTENT_SLOTS].sort(), ['purpose', 'tenantLicensing', 'tenantType', 'timezone']);
     assert.equal(INTENT_SLOTS.has('owner'), false);

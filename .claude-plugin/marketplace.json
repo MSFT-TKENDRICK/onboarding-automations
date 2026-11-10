@@ -15,7 +15,11 @@
       "strict": false,
       "skills": [
         "./skills/request-new-azure-subscription",
-        "./skills/request-new-github-repository"
+        "./skills/request-new-github-repository",
+        "./skills/check-github-access",
+        "./skills/check-msx-access",
+        "./skills/new-hire-readiness",
+        "./skills/verify-customer-deal-teams"
       ]
     }
   ]

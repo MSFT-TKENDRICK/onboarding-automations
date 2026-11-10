@@ -1,0 +1,18 @@
+{
+  "name": "microsoft-onboarding",
+  "owner": {
+    "name": "MSFT-TKENDRICK"
+  },
+  "metadata": {
+    "description": "Microsoft onboarding and customer verification agent skills.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "onboarding-skills",
+      "description": "Onboarding, access readiness, and verified customer deal-team skills.",
+      "version": "1.0.0",
+      "source": "./"
+    }
+  ]
+}

@@ -119,6 +119,7 @@ describe('nextHint', () => {
     const u = nextHint('submit', { outcome: 'unknown', probableCaseId: 'REQ-000002-2026' });
     assert.match(u, /Do NOT resubmit/);
     assert.match(u, /status --case REQ-000002-2026/);
+    assert.match(u, /not which submission created it/);
     assert.match(nextHint('submit', { outcome: 'unknown' }), /status/);
     for (const reason of ['plan_mismatch', 'form_changed', 'submit_body_mismatch', 'plan_no_longer_ready']) assert.match(nextHint('submit', { outcome: 'not_submitted', reason }), /Re-run plan/, reason);
     assert.match(nextHint('submit', { outcome: 'not_submitted', reason: 'duplicate_active' }), /--allow-duplicate/);

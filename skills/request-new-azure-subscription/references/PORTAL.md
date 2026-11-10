@@ -103,9 +103,10 @@ the browser never sends the submit. The driver works like this:
    nothing is sent. The form is also re-read right before arming (`form_changed`).
 3. It journals `prepared` → `sent` (fsynced, lock ownership re-checked) under `<state>/locks`.
 4. It sends the POST once from Node and fulfils the browser's request with the response.
-5. It reconciles through the Web API: `success` needs exactly one new request with the title; a confirmation-page case
-   ID alone is reported as `unknown` with `probableCaseId`. `rejected` needs the re-rendered form with errors and a
-   Web API query proving nothing was created.
+5. It reconciles through the Web API: `success` needs exactly one new request with the title in a complete history,
+   plus the same case ID in the successful POST response and on the confirmation page. Insufficient evidence is
+   `unknown` with a candidate case ID when available. `rejected` needs the re-rendered form with errors and a
+   complete Web API query proving nothing was created.
 
 The browser is driven over `--remote-debugging-pipe` (fds 3/4, NUL-delimited JSON), so no DevTools port is exposed.
 
@@ -159,3 +160,8 @@ The first live run on the same day failed A1 and A4. It also showed that every l
 
 - An existing *active* Internal request for the same owner blocks new Internal requests (`active_request`).
 - Eligibility depends on field order (see above); a human filling type before owner can bypass the check in the UI.
+- Before submission and during post-submit reconciliation, the driver follows bounded same-origin request-list
+  continuations without a total-result cap. Missing fields, malformed records, changed-query or cyclic links, a
+  timeout, or the page/record limit make the read incomplete. An incomplete duplicate check prevents submission;
+  incomplete post-submit evidence leaves the outcome `unknown` and does not permit resubmission. Reconciliation
+  excludes every matching case seen before submission, including closed cases.
