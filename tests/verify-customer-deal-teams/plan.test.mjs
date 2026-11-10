@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { planDealTeams, rankCandidates } from '../../skills/verify-customer-deal-teams/scripts/plan.mjs';
+import {
+  planDealTeams, rankCandidates, rankCustomerCandidates,
+} from '../../skills/verify-customer-deal-teams/scripts/plan.mjs';
 
 const now = Date.parse('2026-11-09T12:00:00Z');
 const date = new Date(now).toISOString();
@@ -58,6 +60,21 @@ function evidence() {
   };
   refreshCandidateSet(input);
   return input;
+}
+
+function customerEvidence() {
+  const input = evidence();
+  return {
+    expectedIdentity: input.expectedIdentity,
+    identity: input.identity,
+    discovery: {
+      ...input.assignments.discovery,
+      records: [{
+        customerId: 'fixture-customer', customerName: 'Fixture Customer',
+        signals: structuredClone(input.assignments.discovery.records[0].signals),
+      }],
+    },
+  };
 }
 
 function blocked(input, pattern) {
@@ -302,6 +319,89 @@ test('partial source coverage is reported and never implied to cover all custome
     source.kind === 'm365-engagement' && source.status === 'unavailable'));
 });
 
+test('preliminary customer review ranks unresolved names without granting account confirmation', () => {
+  const input = customerEvidence();
+  input.discovery.sources.find(source => source.kind === 'account-team').status = 'partial';
+  input.discovery.records.push({
+    customerId: 'another-customer', customerName: 'Fixture Customer',
+    signals: [signal('m365-engagement', { strength: 'historical' })],
+  });
+  const before = structuredClone(input);
+  const result = rankCustomerCandidates(input, { now });
+  assert.equal(result.status, 'customer-candidates');
+  assert.match(result.customerSetId, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(result.scopeComplete, false);
+  assert.equal(result.requiresExactAccountReview, true);
+  assert.equal(result.grantsAssignment, false);
+  assert.equal(result.writesPerformed, 0);
+  assert.deepEqual(result.candidates.map(item => [item.customerId, item.confidence]), [
+    ['fixture-customer', 75], ['another-customer', 4],
+  ]);
+  assert.ok(result.candidates.every(item => !Object.hasOwn(item, 'accountId')));
+  assert.equal(Object.hasOwn(result, 'candidateSetId'), false);
+  assert.deepEqual(input, before);
+});
+
+test('preliminary review fingerprints bind names and evidence regardless of input order', () => {
+  const input = customerEvidence();
+  input.discovery.records.push({
+    customerId: 'other', customerName: 'Other Customer',
+    signals: [signal('m365-engagement', { strength: 'unknown' })],
+  });
+  const first = rankCustomerCandidates(input, { now });
+  const reordered = structuredClone(input);
+  reordered.discovery.sources.reverse();
+  reordered.discovery.records.reverse();
+  reordered.discovery.records.forEach(candidate => candidate.signals.reverse());
+  assert.equal(rankCustomerCandidates(reordered, { now }).customerSetId, first.customerSetId);
+  reordered.discovery.records[0].customerName = 'Changed Customer';
+  assert.notEqual(rankCustomerCandidates(reordered, { now }).customerSetId, first.customerSetId);
+});
+
+test('preliminary customer selection cannot authorize the exact-account planner', () => {
+  const preliminary = rankCustomerCandidates(customerEvidence(), { now });
+  const input = evidence();
+  input.assignments.confirmation.candidateSetId = preliminary.customerSetId;
+  blocked(input, /list changed/);
+  const namesAsAccounts = evidence();
+  namesAsAccounts.assignments.confirmation.selectedAccountIds = ['fixture-customer'];
+  blocked(namesAsAccounts, /GUID/);
+  const namesAsDiscovery = evidence();
+  namesAsDiscovery.assignments.discovery = customerEvidence().discovery;
+  blocked(namesAsDiscovery, /unexpected or missing fields/);
+});
+
+const invalidCustomerCases = [
+  ['wrong signal user', input => { input.discovery.records[0].signals[0].userId = id(8); }, /another user/],
+  ['duplicate ID', input => { input.discovery.records.push(structuredClone(input.discovery.records[0])); }, /duplicate/],
+  ['invalid ID', input => { input.discovery.records[0].customerId = '../customer'; }, /invalid ID/],
+  ['extra account field', input => { input.discovery.records[0].accountId = id(4); }, /unexpected or missing fields/],
+  ['missing signals', input => { input.discovery.records[0].signals = []; }, /bounded signals/],
+  ['unavailable source', input => {
+    input.discovery.sources.find(source => source.kind === 'opportunity-team').status = 'unavailable';
+  }, /source marked unavailable/],
+  ['open opportunity without association', input => {
+    input.discovery.records[0].signals = [signal('open-opportunity')];
+  }, /association signal/],
+  ['signal after discovery', input => {
+    input.discovery.records[0].signals[0].observedAt = new Date(now + 1).toISOString();
+  }, /after discovery/],
+  ['stale discovery', input => { input.discovery.observedAt = new Date(now - 86400001).toISOString(); }, /stale/],
+  ['future discovery', input => { input.discovery.observedAt = new Date(now + 1).toISOString(); }, /future/],
+  ['stale identity', input => { input.identity.observedAt = new Date(now - 300001).toISOString(); }, /stale/],
+];
+
+for (const [name, change, reason] of invalidCustomerCases) {
+  test(`preliminary customer ranking blocks ${name}`, () => {
+    const input = customerEvidence();
+    change(input);
+    const result = rankCustomerCandidates(input, { now });
+    assert.equal(result.status, 'blocked');
+    assert.deepEqual(result.candidates, []);
+    assert.match(result.reason, reason);
+  });
+}
+
 test('candidate fingerprints are order-independent and bind identity, evidence and scores', () => {
   const input = evidence();
   input.assignments.discovery.records.push({
@@ -433,6 +533,31 @@ test('JSON CLI ranks fresh candidates without granting approval', async () => {
     assert.equal(output.candidates[0].confidence, 75);
     assert.match(output.candidateSetId, /^sha256:[0-9a-f]{64}$/);
     assert.equal(Object.hasOwn(output, 'approved'), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('JSON CLI ranks preliminary customer names without resolving or confirming accounts', async () => {
+  const root = await mkdtemp(join(tmpdir(), 'deal-team-customers-'));
+  try {
+    const input = customerEvidence();
+    const observedAt = new Date().toISOString();
+    input.identity.observedAt = observedAt;
+    input.discovery.observedAt = observedAt;
+    input.discovery.records[0].signals.forEach(item => { item.observedAt = observedAt; });
+    const file = join(root, 'customers.json');
+    await writeFile(file, JSON.stringify(input));
+    const script = fileURLToPath(new URL('../../skills/verify-customer-deal-teams/scripts/plan.mjs', import.meta.url));
+    const result = spawnSync(process.execPath, [script, '--customers', file], { encoding: 'utf8', timeout: 10000 });
+    assert.equal(result.status, 0, result.stderr);
+    const output = JSON.parse(result.stdout);
+    assert.equal(output.status, 'customer-candidates');
+    assert.equal(output.requiresExactAccountReview, true);
+    assert.equal(output.grantsAssignment, false);
+    assert.equal(output.writesPerformed, 0);
+    assert.equal(output.candidates[0].confidence, 75);
+    assert.equal(Object.hasOwn(output.candidates[0], 'accountId'), false);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

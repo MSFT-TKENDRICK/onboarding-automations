@@ -103,7 +103,7 @@ function resolveIdentity(expected, identity, now) {
   return { tenantId, userId };
 }
 
-function collectCandidates(discovery, { tenantId, userId }, now) {
+function readDiscovery(discovery, now) {
   object(discovery, ['observedAt', 'sources', 'records'], 'candidate discovery');
   const discoveredAt = timestamp(discovery.observedAt, 'candidate discovery.observedAt');
   requireThat(discoveredAt <= now && now - discoveredAt <= MAX_REVIEW_AGE_MS,
@@ -122,6 +122,52 @@ function collectCandidates(discovery, { tenantId, userId }, now) {
   const sources = SOURCE_KINDS.map(kind => ({ kind, status: sourceStatuses.get(kind) }));
   requireThat(Array.isArray(discovery.records) && discovery.records.length <= 5000,
     'candidate discovery: record budget exceeded');
+  return { discoveredAt, sourceStatuses, sources };
+}
+
+function rankSignals(rawSignals, sourceStatuses, userId, discoveredAt, label) {
+  requireThat(Array.isArray(rawSignals) && rawSignals.length > 0 && rawSignals.length <= 100,
+    `${label}: bounded signals required`);
+  const contributions = new Map();
+  const signals = rawSignals.map(signal => {
+    object(signal, ['kind', 'source', 'recordId', 'userId', 'observedAt', 'strength', 'summary'], 'candidate signal');
+    requireThat(Object.hasOwn(SIGNAL_WEIGHTS, signal.kind), 'candidate signal: unknown kind');
+    requireThat(guid(signal.userId, 'candidate signal user') === userId, 'candidate signal belongs to another user');
+    if (SOURCE_KINDS.includes(signal.kind)) {
+      requireThat(sourceStatuses.get(signal.kind) !== 'unavailable', 'candidate signal: source marked unavailable');
+    }
+    text(signal.source, 'candidate signal source');
+    if (signal.kind !== 'user-provided' || signal.recordId !== null) {
+      text(signal.recordId, 'candidate signal record ID');
+    }
+    requireThat(timestamp(signal.observedAt, 'candidate signal.observedAt') <= discoveredAt,
+      'candidate signal: observed after discovery');
+    requireThat(Object.hasOwn(STRENGTH, signal.strength), 'candidate signal: invalid strength');
+    text(signal.summary, 'candidate signal summary');
+    const points = Math.round(SIGNAL_WEIGHTS[signal.kind] * STRENGTH[signal.strength]);
+    const previous = contributions.get(signal.kind);
+    if (previous === undefined || (points >= 0 ? points > previous : points < previous)) {
+      contributions.set(signal.kind, points);
+    }
+    return {
+      kind: signal.kind, source: signal.source, recordId: signal.recordId,
+      userId, observedAt: signal.observedAt, strength: signal.strength, summary: signal.summary,
+    };
+  }).sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right)));
+  requireThat(signals.some(signal => signal.kind !== 'open-opportunity' && signal.kind !== 'coverage-transition'),
+    `${label}: an association signal is required`);
+  const reasons = [...contributions].sort(([left], [right]) => compare(left, right))
+    .map(([kind, points]) => ({ kind, points }));
+  const confidence = Math.max(0, Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)));
+  return { confidence, reasons, signals };
+}
+
+function scopeComplete(sources) {
+  return sources.every(source => source.status === 'complete');
+}
+
+function collectCandidates(discovery, { tenantId, userId }, now) {
+  const { discoveredAt, sourceStatuses, sources } = readDiscovery(discovery, now);
   const accountIds = new Set();
   const candidates = discovery.records.map(row => {
     object(row, ['accountId', 'accountName', 'active', 'signals'], 'candidate');
@@ -129,40 +175,10 @@ function collectCandidates(discovery, { tenantId, userId }, now) {
     unique(accountIds, accountId, 'candidate account');
     text(row.accountName, 'candidate account name');
     requireThat(typeof row.active === 'boolean', 'candidate account: active state required');
-    requireThat(Array.isArray(row.signals) && row.signals.length > 0 && row.signals.length <= 100,
-      'candidate account: bounded signals required');
-    const contributions = new Map();
-    const signals = row.signals.map(signal => {
-      object(signal, ['kind', 'source', 'recordId', 'userId', 'observedAt', 'strength', 'summary'], 'candidate signal');
-      requireThat(Object.hasOwn(SIGNAL_WEIGHTS, signal.kind), 'candidate signal: unknown kind');
-      requireThat(guid(signal.userId, 'candidate signal user') === userId, 'candidate signal belongs to another user');
-      if (SOURCE_KINDS.includes(signal.kind)) {
-        requireThat(sourceStatuses.get(signal.kind) !== 'unavailable', 'candidate signal: source marked unavailable');
-      }
-      text(signal.source, 'candidate signal source');
-      if (signal.kind !== 'user-provided' || signal.recordId !== null) {
-        text(signal.recordId, 'candidate signal record ID');
-      }
-      requireThat(timestamp(signal.observedAt, 'candidate signal.observedAt') <= discoveredAt,
-        'candidate signal: observed after discovery');
-      requireThat(Object.hasOwn(STRENGTH, signal.strength), 'candidate signal: invalid strength');
-      text(signal.summary, 'candidate signal summary');
-      const points = Math.round(SIGNAL_WEIGHTS[signal.kind] * STRENGTH[signal.strength]);
-      const previous = contributions.get(signal.kind);
-      if (previous === undefined || (points >= 0 ? points > previous : points < previous)) {
-        contributions.set(signal.kind, points);
-      }
-      return {
-        kind: signal.kind, source: signal.source, recordId: signal.recordId,
-        userId, observedAt: signal.observedAt, strength: signal.strength, summary: signal.summary,
-      };
-    }).sort((left, right) => compare(JSON.stringify(left), JSON.stringify(right)));
-    requireThat(signals.some(signal => signal.kind !== 'open-opportunity' && signal.kind !== 'coverage-transition'),
-      'candidate account: an association signal is required');
-    const reasons = [...contributions].sort(([left], [right]) => compare(left, right))
-      .map(([kind, points]) => ({ kind, points }));
-    const confidence = Math.max(0, Math.min(100, reasons.reduce((sum, reason) => sum + reason.points, 0)));
-    return { accountId, accountName: row.accountName, active: row.active, confidence, reasons, signals };
+    return {
+      accountId, accountName: row.accountName, active: row.active,
+      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'candidate account'),
+    };
   });
   const canonical = [...candidates].sort((left, right) => compare(left.accountId, right.accountId));
   const candidateSetId = `sha256:${createHash('sha256').update(JSON.stringify({
@@ -172,12 +188,47 @@ function collectCandidates(discovery, { tenantId, userId }, now) {
     status: 'candidates',
     candidateSetId,
     observedAt: discovery.observedAt,
-    scopeComplete: sources.every(source => source.status === 'complete'),
+    scopeComplete: scopeComplete(sources),
     sources,
     candidates: candidates.sort((left, right) =>
       right.confidence - left.confidence
       || compare(left.accountName, right.accountName)
       || compare(left.accountId, right.accountId)),
+  };
+}
+
+function collectCustomerCandidates(discovery, { tenantId, userId }, now) {
+  const { discoveredAt, sourceStatuses, sources } = readDiscovery(discovery, now);
+  const customerIds = new Set();
+  const candidates = discovery.records.map(row => {
+    object(row, ['customerId', 'customerName', 'signals'], 'customer candidate');
+    requireThat(typeof row.customerId === 'string'
+      && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(row.customerId), 'customer candidate: invalid ID');
+    unique(customerIds, row.customerId, 'customer candidate');
+    text(row.customerName, 'customer name');
+    return {
+      customerId: row.customerId, customerName: row.customerName,
+      ...rankSignals(row.signals, sourceStatuses, userId, discoveredAt, 'customer candidate'),
+    };
+  });
+  const canonical = [...candidates].sort((left, right) => compare(left.customerId, right.customerId));
+  const customerSetId = `sha256:${createHash('sha256').update(JSON.stringify({
+    reviewKind: 'customer-name-only', tenantId, userId, observedAt: discovery.observedAt, sources,
+    candidates: canonical,
+  })).digest('hex')}`;
+  return {
+    status: 'customer-candidates',
+    customerSetId,
+    observedAt: discovery.observedAt,
+    scopeComplete: scopeComplete(sources),
+    sources,
+    candidates: candidates.sort((left, right) =>
+      right.confidence - left.confidence
+      || compare(left.customerName, right.customerName)
+      || compare(left.customerId, right.customerId)),
+    requiresExactAccountReview: true,
+    grantsAssignment: false,
+    writesPerformed: 0,
   };
 }
 
@@ -189,6 +240,19 @@ export function rankCandidates(input, { now = Date.now() } = {}) {
     requireThat(Number.isFinite(now), 'invalid clock');
     object(input, ['expectedIdentity', 'identity', 'discovery'], 'candidate evidence');
     return collectCandidates(input.discovery, resolveIdentity(input.expectedIdentity, input.identity, now), now);
+  } catch (error) {
+    return { status: 'blocked', reason: error.message, candidates: [] };
+  }
+}
+
+/**
+ * Rank customer names for preliminary review without resolving or confirming CRM accounts.
+ */
+export function rankCustomerCandidates(input, { now = Date.now() } = {}) {
+  try {
+    requireThat(Number.isFinite(now), 'invalid clock');
+    object(input, ['expectedIdentity', 'identity', 'discovery'], 'customer evidence');
+    return collectCustomerCandidates(input.discovery, resolveIdentity(input.expectedIdentity, input.identity, now), now);
   } catch (error) {
     return { status: 'blocked', reason: error.message, candidates: [] };
   }
@@ -337,8 +401,8 @@ export function planDealTeams(input, { now = Date.now() } = {}) {
 
 export async function main(args) {
   try {
-    requireThat(args.length === 2 && ['--input', '--candidates'].includes(args[0]),
-      'usage: plan.mjs --input|--candidates <evidence.json>');
+    requireThat(args.length === 2 && ['--input', '--candidates', '--customers'].includes(args[0]),
+      'usage: plan.mjs --input|--candidates|--customers <evidence.json>');
     const file = await open(resolve(args[1]), 'r');
     let input;
     try {
@@ -356,7 +420,9 @@ export async function main(args) {
       await file.close();
     }
     const evidence = JSON.parse(input.toString('utf8'));
-    const result = args[0] === '--candidates' ? rankCandidates(evidence) : planDealTeams(evidence);
+    const result = args[0] === '--customers'
+      ? rankCustomerCandidates(evidence)
+      : args[0] === '--candidates' ? rankCandidates(evidence) : planDealTeams(evidence);
     console.log(JSON.stringify(result));
     return result.status === 'blocked' ? 2 : 0;
   } catch (error) {

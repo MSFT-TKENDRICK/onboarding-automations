@@ -44,8 +44,9 @@ the proposal.
    GUIDs; an open opportunity alone is not an association. Search available
    WorkIQ/M365 meetings, email, and Teams for direct user/customer engagement
    and conflicting coverage or handoff evidence. These are candidate signals,
-   not proof of assignment. Associate a name-based signal only after resolving
-   it unambiguously to an exact account GUID.
+   not proof of assignment. Name-based signals can inform a preliminary
+   customer review; associate them with an exact CRM account only after
+   resolving the relationship unambiguously.
 5. Exhaust each supported query's pages, subject to a stated record/time budget.
    Record each source as `complete`, `partial`, or `unavailable`; an unavailable
    source or missing semantic field does not prevent other candidates from
@@ -54,6 +55,49 @@ the proposal.
    ambiguous. Do not expand to an entire corporate family or territory.
 
 ## Candidate ranking and human selection
+
+### Preliminary customer-name review
+
+When duplicate or unresolved CRM accounts prevent a complete exact-account
+review, first review the discovered customer names. Supply all discovered
+names, including names with resolved CRM matches, rather than silently
+discarding unresolved candidates. Use the same `expectedIdentity`, `identity`,
+`sources`, and signal fields as the exact-account example below, but replace
+`discovery.records` with name-level candidates:
+
+```json
+{
+  "customerId": "customer-1",
+  "customerName": "Customer mentioned in a tracker",
+  "signals": [{
+    "kind": "m365-engagement", "source": "Tracker notification",
+    "recordId": "<source record identifier>", "userId": "<guid>",
+    "observedAt": "<ISO read time>", "strength": "historical",
+    "summary": "A historical tracker item assigned to the user names this customer"
+  }]
+}
+```
+
+`customerId` is a unique, stable review-local identifier, not a CRM account
+GUID. Do not merge distinct customer names or choose among duplicate legal
+entities merely by display name. Run the helper against a complete input object:
+
+```powershell
+node skills\verify-customer-deal-teams\scripts\plan.mjs --customers <absolute-evidence-file>
+```
+
+Show every candidate, its heuristic score, supporting and conflicting evidence,
+and partial/unavailable sources; ask which named customers are assigned to the
+user. Record the actual answer, its elicitation/session reference, review time,
+and `customerSetId`. If the list changes or expires after 24 hours, rerank and
+ask again. The fingerprint detects changes; it does not authenticate a response.
+The result reports `grantsAssignment: false` and
+`requiresExactAccountReview: true`. This preliminary answer selects neither a
+CRM GUID nor permission to plan or write. Resolve each selected name and obtain
+a separate exact-account selection below; stop when the user cannot
+disambiguate. A user-supplied missing name requires a new preliminary review.
+
+### Exact-account ranking and confirmation
 
 The helper ranks normalized evidence; it does not fetch anything. Store its
 input/output outside the repository. Supply every source kind below exactly

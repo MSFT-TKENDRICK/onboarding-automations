@@ -33,6 +33,9 @@ const mutations = [
   ['strongest signal wins', 'const previous = contributions.get(signal.kind);', 'const previous = undefined;'],
   ['contradictory coverage', "'coverage-transition': -5", "'coverage-transition': 0"],
   ['bounded confidence', 'Math.min(100, reasons.reduce', 'Math.min(1000, reasons.reduce'],
+  ['preliminary review does not confirm accounts', 'grantsAssignment: false', 'grantsAssignment: true'],
+  ['exact review remains required', 'requiresExactAccountReview: true', 'requiresExactAccountReview: false'],
+  ['unique preliminary candidates', "unique(customerIds, row.customerId, 'customer candidate');", 'void 0;'],
 ];
 const root = await mkdtemp(join(tmpdir(), 'deal-team-mutations-'));
 let killed = 0;
