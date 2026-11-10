@@ -18,8 +18,8 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install skills-ref
-        run: pip install skills-ref
+      - name: Install skill and plugin validators
+        run: pip install jsonschema skills-ref
 
       - name: Validate every skill
         run: |
@@ -41,6 +41,22 @@ jobs:
           for p in sorted(missing): print(f"::error::{p} is not listed in .claude-plugin/marketplace.json")
           for p in sorted(stale): print(f"::error::{p} is listed in .claude-plugin/marketplace.json but does not exist")
           sys.exit(1 if missing or stale else 0)
+          PY
+
+      - name: Validate the Agent Plugins schema
+        run: |
+          python - <<'PY'
+          import json, urllib.request
+          import jsonschema
+          schema_url = "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json"
+          with open("plugin.json", encoding="utf-8") as f:
+              manifest = json.load(f)
+          if manifest.get("$schema") != schema_url:
+              raise ValueError("Unexpected Agent Plugins schema")
+          with urllib.request.urlopen(schema_url, timeout=20) as response:
+              schema = json.load(response)
+          jsonschema.Draft202012Validator.check_schema(schema)
+          jsonschema.validate(manifest, schema)
           PY
 
   test:
